@@ -49,13 +49,23 @@
     const formatMoney = (num) => Number(num || 0).toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
     const getDaysAgo = (days) => { const d = new Date(); d.setDate(d.getDate() - days); return d.toISOString().split('T')[0]; };
     const getTodayFormatted = () => new Date().toISOString().split('T')[0];
-    const parseDDMMYYYY = (str) => { if(!str) return new Date(); const [d, m, y] = str.split('/'); return new Date(y, m - 1, d); };
+    const parseDDMMYYYY = (str) => { 
+      if(!str) return new Date(); 
+      if(str.includes('-')) { const [y, m, d] = str.split('-'); return new Date(y, m - 1, d); }
+      const [d, m, y] = str.split('/'); return new Date(y, m - 1, d); 
+    };
     const formatDDMMYYYY = (dateObj) => `${String(dateObj.getDate()).padStart(2, '0')}/${String(dateObj.getMonth() + 1).padStart(2, '0')}/${dateObj.getFullYear()}`;
     const pctValue = (val, base) => base > 0 ? ((val / base) * 100).toFixed(1) : 0;
 
     const compressData = (dataObj) => {
-      try { return window.btoa(String.fromCharCode.apply(null, window.pako.deflate(new TextEncoder().encode(JSON.stringify(dataObj))))); } 
-      catch (e) { return null; }
+      try { 
+        const uint8array = window.pako.deflate(new TextEncoder().encode(JSON.stringify(dataObj)));
+        let binaryStr = "";
+        for (let i = 0; i < uint8array.length; i++) {
+          binaryStr += String.fromCharCode(uint8array[i]);
+        }
+        return window.btoa(binaryStr);
+      } catch (e) { return null; }
     };
     const decompressData = (base64Str) => {
       try {
@@ -133,7 +143,7 @@
       const [receipts, setReceipts] = useState([]); const [pendingPOs, setPendingPOs] = useState([]); 
       const [dailyExpenses, setDailyExpenses] = useState([]); const [monthlyOverheads, setMonthlyOverheads] = useState({});
       
-      const [pendingSalesInputs, setPendingSalesInputs] = useState({}); const [expenseInput, setExpenseInput] = useState({ name: '', amount: '' });
+      const [pendingSalesInputs, setPendingSalesInputs] = useState({}); const [expenseInput, setExpenseInput] = useState({ name: '', amount: '', payMethod: 'เงินสด' });
 
       const getOverheadList = (monthKey) => { const data = monthlyOverheads[monthKey]; return data ? (Array.isArray(data) ? data : [{ id: `lgc-${monthKey}`, name: 'ค่าใช้จ่ายรวม', estimate: data.estimate || 0, actual: data.actual === null ? '' : data.actual }]) : []; };
 
@@ -201,11 +211,15 @@
                 if (raw.compressedPayload) { lastSavedPayload.current = raw.compressedPayload; loadedData = decompressData(raw.compressedPayload); isComp = true; } 
                 else if (raw.inventory) { loadedData = raw; }
               }
-              if (loadedData && loadedData.inventory && loadedData.inventory.length > 0) {
-                setInventory(loadedData.inventory); setDailyHistory(loadedData.dailyHistory || []); setReceipts(loadedData.receipts || []);
-                if (loadedData.vendors) setVendors(loadedData.vendors); if (loadedData.categoryOrder) setCategoryOrder(loadedData.categoryOrder);
-                setPendingPOs(loadedData.pendingPOs || []); setDailyExpenses(loadedData.dailyExpenses || []); setMonthlyOverheads(loadedData.monthlyOverheads || {});
-                if (loadedData.expenseCategories) setExpCats(loadedData.expenseCategories);
+              if (loadedData) {
+                setInventory(loadedData.inventory || []); setDailyHistory(loadedData.dailyHistory || []); setReceipts(loadedData.receipts || []);
+                if (loadedData.vendors) setVendors(loadedData.vendors); else setVendors(['ตลาดสด', 'Makro', 'ร้านเจ๊หมวย']); 
+                if (loadedData.categoryOrder) setCategoryOrder(loadedData.categoryOrder); else setCategoryOrder(['เนื้อสัตว์', 'อาหารทะเล', 'ผักสด', 'ของแห้ง', 'เครื่องปรุง', 'เครื่องดื่ม', 'อื่นๆ']);
+                setPendingPOs(loadedData.pendingPOs || []); 
+                setDailyExpenses((loadedData.dailyExpenses || []).filter(e => e.date && !isNaN(parseDDMMYYYY(e.date).getTime()))); 
+                setMonthlyOverheads(loadedData.monthlyOverheads || {});
+                if (loadedData.expenseCategories) setExpCats(loadedData.expenseCategories); else setExpCats(['ค่าแก๊ส', 'น้ำแข็ง', 'ซื้อของจุกจิก', 'ค่าซ่อมบำรุง']);
+                setDailySalesRecords(loadedData.dailySalesRecords || []); setCashDeposits(loadedData.cashDeposits || []);
                 const bytes = isComp && docSnap.data().compressedPayload ? docSnap.data().compressedPayload.length : new TextEncoder().encode(JSON.stringify(loadedData)).length;
                 setDbSizeInfo({ kbLength: (bytes / 1024).toFixed(1), percentUsed: ((bytes / 1048576) * 100).toFixed(2), estDaysLeft: loadedData.dailyHistory?.length > 0 ? Math.floor((1048576 - bytes) / (bytes / loadedData.dailyHistory.length)) : 'N/A', isCompressed: isComp });
               } else {
@@ -225,16 +239,21 @@
         if (!db || !isSyncActive || !isDataLoaded) return;
         const saveToFirebase = async () => {
           try {
-            const fullData = { inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expenseCategories: expCats };
+            const fullData = { inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expenseCategories: expCats, dailySalesRecords, cashDeposits };
             const compressedBase64 = compressData(fullData);
             if(compressedBase64) {
               if (compressedBase64 !== lastSavedPayload.current) { lastSavedPayload.current = compressedBase64; await window.FirebaseAPI.setDoc(window.FirebaseAPI.doc(db, "restaurant_data", selectedBranch), { compressedPayload: compressedBase64, lastUpdated: new Date().toISOString() }); }
-            } else { await window.FirebaseAPI.setDoc(window.FirebaseAPI.doc(db, "restaurant_data", selectedBranch), fullData, { merge: true }); }
-          } catch(e) { console.error("Firebase auto-save error:", e); }
+            } else { await window.FirebaseAPI.setDoc(window.FirebaseAPI.doc(db, "restaurant_data", selectedBranch), { ...fullData, lastUpdated: new Date().toISOString() }); }
+          } catch(e) { 
+            console.error("Firebase auto-save error:", e); 
+            if(e.message && e.message.toLowerCase().includes('exceeds the maximum')) {
+              alert("⚠️ ไม่สามารถบันทึกข้อมูลได้ เนื่องจากพื้นที่เก็บข้อมูลสาขานี้เต็ม (1MB)!\nกรุณาไปที่ 'ตั้งค่า' แล้วกด 'ลบประวัติเก่า' เพื่อคืนพื้นที่ว่างทันทีครับ");
+            }
+          }
         };
         const timer = setTimeout(saveToFirebase, 2500); 
         return () => clearTimeout(timer);
-      }, [inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expCats, db, isSyncActive, selectedBranch, isDataLoaded]);
+      }, [inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expCats, dailySalesRecords, cashDeposits, db, isSyncActive, selectedBranch, isDataLoaded]);
 
       const isItemVisible = (item) => item.isActive !== false || item.showWhenInactive === true;
       const getItemName = (item) => item.isActive === false ? `${item.name} (ไม่ใช้แล้ว)` : item.name;
@@ -271,6 +290,33 @@
       const [showWasteModal, setShowWasteModal] = useState(null); 
       const [staffNameInput, setStaffNameInput] = useState('');
       const [countDate, setCountDate] = useState(getTodayFormatted());
+      // AP (Accounts Payable) สำหรับจัดการบิลค้างชำระ
+      const [apSortMode, setApSortMode] = useState('amount'); // 'amount' | 'name'
+      const [apExpandedVendor, setApExpandedVendor] = useState(null);
+      const [apExpandedBill, setApExpandedBill] = useState(null);
+      const [apSelectedBills, setApSelectedBills] = useState({});
+      const [apPayMethod, setApPayMethod] = useState('เงินสด');
+      const [apPayDate, setApPayDate] = useState(getTodayFormatted);
+      // แก้ไขยอดค่าใช้จ่าย inline edit
+      const [editingExpId, setEditingExpId] = useState(null);
+      const [editingExpAmount, setEditingExpAmount] = useState('');
+      // ===== ระบบบันทึกยอดขายรายวันตามวิธีชำระ =====
+      const [dailySalesRecords, setDailySalesRecords] = useState([]); // [{id,date,closedDay,cash,transfer,grab:{before,after},lineman:{before,after},credits:[{name,amount}]}]
+      const [cashDeposits, setCashDeposits] = useState([]); // [{id,date,amount,note}]
+      // UI States สำหรับ Card บันทึกยอดขาย
+      const [salesRecordDate, setSalesRecordDate] = useState(getTodayFormatted());
+      const [srCash, setSrCash] = useState('');
+      const [srTransfer, setSrTransfer] = useState('');
+      const [srGrabBefore, setSrGrabBefore] = useState('');
+      const [srGrabAfter, setSrGrabAfter] = useState('');
+      const [srLinemanBefore, setSrLinemanBefore] = useState('');
+      const [srLinemanAfter, setSrLinemanAfter] = useState('');
+      const [srCredits, setSrCredits] = useState([{ name: '', amount: '' }]); // [{name,amount}]
+      const [srEditId, setSrEditId] = useState(null); // id ของ record ที่กำลังแก้ไข
+      // UI States สำหรับหน้าเงินสด
+      const [cashMgmtDepositDate, setCashMgmtDepositDate] = useState(getTodayFormatted());
+      const [cashMgmtDepositAmt, setCashMgmtDepositAmt] = useState('');
+      const [cashMgmtDepositNote, setCashMgmtDepositNote] = useState('');
 
       useEffect(() => { if (!matrixCategory && categoryOrder.length > 0) setMatrixCategory(''); }, [categoryOrder]);
       useEffect(() => { if (!stockMatrixCategory && categoryOrder.length > 0) setStockMatrixCategory(''); }, [categoryOrder]);
@@ -286,7 +332,34 @@
       const shiftStockMatrix = (steps) => setStockMatrixOffset(prev => Math.max(0, Math.min(maxStockMatrixOffset, prev + steps)));
       const visibleStockDates = uniqueCheckedDates.slice(stockMatrixOffset, stockMatrixOffset + 10);
 
-      const pendingRecords = useMemo(() => { return dailyHistory.filter(h => h.sales === null && h.type === 'checked').sort((a, b) => parseDDMMYYYY(a.endDate || a.date) - parseDDMMYYYY(b.endDate || b.date)); }, [dailyHistory]);
+      // pendingRecords: รอบที่ยังไม่ได้ลงยอดขาย (auto-enriched จาก dailySalesRecords)
+      const pendingRecords = useMemo(() => {
+        return dailyHistory
+          .filter(h => h.sales === null && h.type === 'checked')
+          .sort((a, b) => parseDDMMYYYY(a.endDate || a.date) - parseDDMMYYYY(b.endDate || b.date))
+          .map(h => {
+            // คำนวณยอดขายอัตโนมัติจาก dailySalesRecords
+            let autoSales = null; let covered = 0; let totalDays = 0;
+            if (dailySalesRecords.length > 0) {
+              const startMs = parseDDMMYYYY(h.startDate || h.date);
+              const endMs = parseDDMMYYYY(h.endDate || h.date);
+              totalDays = Math.round((endMs - startMs) / 86400000) + 1;
+              let total = 0;
+              dailySalesRecords.forEach(r => {
+                const rMs = parseDDMMYYYY(r.date);
+                if (rMs >= startMs && rMs <= endMs) {
+                  const grabAmt = (r.grab?.after != null && r.grab?.after !== '') ? Number(r.grab.after) : Number(r.grab?.before || 0);
+                  const linemanAmt = (r.lineman?.after != null && r.lineman?.after !== '') ? Number(r.lineman.after) : Number(r.lineman?.before || 0);
+                  const creditTotal = (r.credits || []).reduce((s, c) => s + Number(c.amount || 0), 0);
+                  total += Number(r.cash || 0) + Number(r.transfer || 0) + grabAmt + linemanAmt + creditTotal;
+                  covered++;
+                }
+              });
+              if (covered > 0) autoSales = total;
+            }
+            return { ...h, _autoSales: autoSales, _coveredDays: covered, _totalDays: totalDays };
+          });
+      }, [dailyHistory, dailySalesRecords]);
       const completedRecords = useMemo(() => { return dailyHistory.filter(h => h.sales !== null && h.type === 'checked').sort((a, b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date)); }, [dailyHistory]);
       
       const getMonthlyStats = () => {
@@ -448,9 +521,12 @@
       const promptEditVendor = (oldVendor) => {
         const newVendor = window.prompt(`แก้ไขชื่อร้านค้า "${oldVendor}" เป็น:`, oldVendor);
         if (!newVendor || !newVendor.trim() || newVendor.trim() === oldVendor) return;
-        setVendors(vendors.map(v => v === oldVendor ? newVendor.trim() : v));
-        setInventory(inventory.map(i => i.vendor === oldVendor ? { ...i, vendor: newVendor.trim() } : i));
-        if (selectedVendor === oldVendor) setSelectedVendor(newVendor.trim());
+        const trimmed = newVendor.trim();
+        setVendors(vendors.map(v => v === oldVendor ? trimmed : v));
+        setInventory(inventory.map(i => i.vendor === oldVendor ? { ...i, vendor: trimmed } : i));
+        setReceipts(receipts.map(r => r.vendor === oldVendor ? { ...r, vendor: trimmed } : r));
+        setPendingPOs(pendingPOs.map(p => p.vendor === oldVendor ? { ...p, vendor: trimmed } : p));
+        if (selectedVendor === oldVendor) setSelectedVendor(trimmed);
       };
       const handleDeleteVendor = (vendorName) => {
         if (receipts.some(r => r.vendor === vendorName) || inventory.some(i => i.vendor === vendorName)) return alert(`❌ ไม่สามารถลบได้! ร้านค้าถูกใช้งานอยู่`);
@@ -607,20 +683,48 @@
            item.currentStock = actualClose; item.lastMoved = endDateStr;
         });
 
-        const newHistoryRecord = { id: Date.now().toString(), date: endDateStr, startDate: startDateStr, endDate: endDateStr, days: daysDiff, type: 'checked', sales: null, totalOpeningVal, totalBoughtVal, totalUsedVal, totalWasteVal, totalClosingVal, details };
+        let autoSales = null;
+        if (dailySalesRecords.length > 0) {
+          const startMs = parseDDMMYYYY(startDateStr);
+          const endMs = parseDDMMYYYY(endDateStr);
+          let total = 0; let covered = 0;
+          dailySalesRecords.forEach(r => {
+            const rMs = parseDDMMYYYY(r.date);
+            if (rMs >= startMs && rMs <= endMs) {
+              const grabAmt = (r.grab?.after != null && r.grab?.after !== '') ? Number(r.grab.after) : Number(r.grab?.before || 0);
+              const linemanAmt = (r.lineman?.after != null && r.lineman?.after !== '') ? Number(r.lineman.after) : Number(r.lineman?.before || 0);
+              const creditTotal = (r.credits || []).reduce((s, c) => s + Number(c.amount || 0), 0);
+              total += Number(r.cash || 0) + Number(r.transfer || 0) + grabAmt + linemanAmt + creditTotal;
+              covered++;
+            }
+          });
+          if (covered > 0) autoSales = total;
+        }
+
+        const newHistoryRecord = { id: Date.now().toString(), date: endDateStr, startDate: startDateStr, endDate: endDateStr, days: daysDiff, type: 'checked', sales: autoSales, totalOpeningVal, totalBoughtVal, totalUsedVal, totalWasteVal, totalClosingVal, details };
         setDailyHistory(prev => { const filtered = prev.filter(h => h.endDate !== endDateStr && h.date !== endDateStr); return [newHistoryRecord, ...filtered].sort((a,b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date)); });
         setInventory(updatedInventory);
         
-        alert(`ส่งยอดสต๊อกสำเร็จ!\nรอให้ผู้จัดการบันทึกยอดขายหน้าภาพรวมต่อไป`);
+        if (autoSales != null) {
+          alert(`ส่งยอดสต๊อกและจับคู่ยอดขายอัตโนมัติ (${formatMoney(autoSales)} บาท) สำเร็จ!\nสามารถดูผลกำไรในหน้าภาพรวมได้ทันที`);
+        } else {
+          alert(`ส่งยอดสต๊อกสำเร็จ!\nรอให้ผู้จัดการบันทึกยอดขายหน้าภาพรวมต่อไป`);
+        }
         setDailyCounts({}); setStaffNameInput(''); if(auth.role === 'owner' || auth.role === 'manager') setActiveTab('dashboard');
       };
 
-      const savePendingSales = (recordId) => {
-        const inputVal = pendingSalesInputs[recordId]; if (inputVal === undefined || inputVal === '') return alert('กรุณาระบุยอดขาย');
-        if (!window.confirm('ยืนยันบันทึกยอดขายรอบนี้? บันทึกแล้วจะไม่สามารถกลับไปแก้สต๊อกได้อีก')) return;
-        setDailyHistory(prev => prev.map(h => h.id === recordId ? { ...h, sales: Number(inputVal) } : h ));
+      const savePendingSales = (recordId, autoSalesAmount) => {
+        // ถ้ามียอดอัตโนมัติจาก dailySalesRecords ให้ใช้เลย
+        const useAutoSales = autoSalesAmount != null;
+        const inputVal = useAutoSales ? autoSalesAmount : pendingSalesInputs[recordId];
+        if (!useAutoSales && (inputVal === undefined || inputVal === '')) return alert('กรุณาระบุยอดขาย');
+        const confirmMsg = useAutoSales 
+          ? `ยืนยันใช้ยอดขายอัตโนมัติ ${formatMoney(autoSalesAmount)} บาท จากบันทึกยอดขายรายวัน?สามารถแก้ไขได้ในหน้า “ยอดขาย”`
+          : 'ยืนยันบันทึกยอดขายรอบนี้? บันทึกแล้วจะไม่สามารถกลับไปแก้สต๊อกได้อีก';
+        if (!window.confirm(confirmMsg)) return;
+        setDailyHistory(prev => prev.map(h => h.id === recordId ? { ...h, sales: Number(inputVal) } : h));
         setPendingSalesInputs(prev => { const newState = {...prev}; delete newState[recordId]; return newState; });
-        alert("บันทึกยอดขายและคำนวณกำไรเสร็จสมบูรณ์");
+        alert(`บันทึกยอดขาย ${formatMoney(Number(inputVal))} บาท และคำนวณกำไรเสร็จสมบูรณ์`);
       };
 
       const revertPendingSubmission = (recordId) => {
@@ -641,11 +745,44 @@
         let fn = expenseInput.name.trim(); if(!expCats.includes(fn)) setExpCats([...expCats, fn]);
         let formattedDate = formatDDMMYYYY(parseDDMMYYYY(countDate));
         if(recordId) { const targetRecord = dailyHistory.find(h => h.id === recordId); if(targetRecord) { formattedDate = targetRecord.endDate || targetRecord.date; } }
-        const newExp = { id: `exp-${Date.now()}`, date: formattedDate, name: fn, amount: Number(expenseInput.amount) };
-        setDailyExpenses([...dailyExpenses, newExp]); setExpenseInput({name: '', amount: ''});
+        const newExp = { id: `exp-${Date.now()}`, date: formattedDate, name: fn, amount: Number(expenseInput.amount), payMethod: expenseInput.payMethod || 'เงินสด' };
+        setDailyExpenses([...dailyExpenses, newExp]); setExpenseInput({name: '', amount: '', payMethod: 'เงินสด'});
       };
       
       const handleDeleteExpense = (id) => setDailyExpenses(dailyExpenses.filter(e => e.id !== id));
+      const handleUpdateExpense = (id, newAmount) => {
+        setDailyExpenses(dailyExpenses.map(e => e.id === id ? {...e, amount: Number(newAmount)} : e));
+        setEditingExpId(null); setEditingExpAmount('');
+      };
+
+      // สำหรับ AP (Accounts Payable) จัดการชำระบิลค้าง
+      const handleMarkAsPaid = () => {
+        const selectedIds = Object.keys(apSelectedBills).filter(id => apSelectedBills[id]);
+        if (selectedIds.length === 0) return alert('กรุณาเลือกบิลที่ต้องการชำระอย่างน้อย 1 บิล');
+        const vendorSet = new Set(selectedIds.map(id => receipts.find(r => String(r.id) === id)?.vendor).filter(Boolean));
+        if (vendorSet.size > 1) return alert('ไม่สามารถชำระข้ามร้านได้ กรุณาเลือกบิลจากร้านเดียวกันเท่านั้น');
+        const totalAmount = selectedIds.reduce((sum, id) => {
+          const bill = receipts.find(r => String(r.id) === id); return sum + (bill ? bill.total : 0);
+        }, 0);
+        const pDateStr = formatDDMMYYYY(parseDDMMYYYY(apPayDate));
+        if (!window.confirm(`ยืนยันชำระ ${selectedIds.length} บิล ยอดรวม ${formatMoney(totalAmount)} บาท\nวิธีชำระ: ${apPayMethod}\nวันที่ชำระ: ${pDateStr}`)) return;
+        setReceipts(prev => prev.map(r =>
+          selectedIds.includes(String(r.id)) ? {...r, method: apPayMethod, paidAt: pDateStr} : r
+        ));
+        setApSelectedBills({});
+        alert(`ชำระเงิน ${selectedIds.length} บิล (ยอดรวม ${formatMoney(totalAmount)} บ.) เรียบร้อยแล้ว`);
+      };
+
+      const toggleApBill = (billId, vendor) => {
+        const id = String(billId);
+        const alreadySelected = apSelectedBills[id];
+        // ตรวจว่าบิลที่เลือกไว้แล้วเป็นร้านเดียวกันไหม
+        const selectedVendors = new Set(Object.keys(apSelectedBills).filter(k => apSelectedBills[k]).map(k => receipts.find(r => String(r.id) === k)?.vendor).filter(Boolean));
+        if (!alreadySelected && selectedVendors.size > 0 && !selectedVendors.has(vendor)) {
+          return alert(`กำลังเลือกบิลของร้าน "${[...selectedVendors][0]}" อยู่ ไม่สามารถเลือกข้ามร้านได้`);
+        }
+        setApSelectedBills(prev => ({...prev, [id]: !alreadySelected}));
+      };
 
       const handleAddOverheadMonth = () => {
         const nextMonth = window.prompt("ระบุเดือนใหม่ (YYYY-MM) เช่น 2026-06", getTodayFormatted().substring(0, 7));
@@ -663,7 +800,7 @@
         setMonthlyOverheads({ ...monthlyOverheads, [monthKey]: [...getOverheadList(monthKey), newItem] });
       };
 
-      const handleUpdateOverheadItem = (monthKey, id, field, value) => { setMonthlyOverheads({ ...monthlyOverheads, [monthKey]: getOverheadList(monthKey).map(item => item.id === id ? { ...item, [field]: value === '' && field === 'actual' ? '' : Number(value) } : item) }); };
+      const handleUpdateOverheadItem = (monthKey, id, field, value) => { setMonthlyOverheads({ ...monthlyOverheads, [monthKey]: getOverheadList(monthKey).map(item => item.id === id ? { ...item, [field]: ['estimate','actual'].includes(field) ? (value === '' ? '' : Number(value)) : value } : item) }); };
       const handleDeleteOverheadItem = (monthKey, id) => { if(!window.confirm('ยืนยันลบรายการนี้?')) return; setMonthlyOverheads({ ...monthlyOverheads, [monthKey]: getOverheadList(monthKey).filter(item => item.id !== id) }); };
 
       const handleDeleteOldHistory = () => {
@@ -677,8 +814,14 @@
         
         const newDailyHistory = dailyHistory.filter(h => { const dStr = h.endDate || h.date; if(!dStr) return true; const parts = dStr.split('/'); const monthKey = `${parts[2]}-${parts[1]}`; return !monthsToDelete.includes(monthKey); });
         const newReceipts = receipts.filter(r => { const parts = r.date.split('/'); const monthKey = `${parts[2]}-${parts[1]}`; return !monthsToDelete.includes(monthKey); });
+        const newDailySalesRecords = dailySalesRecords.filter(r => { const parts = r.date.split('/'); const monthKey = `${parts[2]}-${parts[1]}`; return !monthsToDelete.includes(monthKey); });
+        const newDailyExpenses = dailyExpenses.filter(e => { const parts = e.date.split('/'); const monthKey = `${parts[2]}-${parts[1]}`; return !monthsToDelete.includes(monthKey); });
+        const newCashDeposits = cashDeposits.filter(c => { const parts = c.date.split('/'); const monthKey = `${parts[2]}-${parts[1]}`; return !monthsToDelete.includes(monthKey); });
+        const newMonthlyOverheads = {};
+        Object.keys(monthlyOverheads).forEach(monthKey => { if (!monthsToDelete.includes(monthKey)) newMonthlyOverheads[monthKey] = monthlyOverheads[monthKey]; });
         
-        setDailyHistory(newDailyHistory); setReceipts(newReceipts); if (selectEl) selectEl.value = ""; alert(`ลบประวัติสำเร็จ! คืนพื้นที่คลาวด์เรียบร้อยแล้ว`);
+        setDailyHistory(newDailyHistory); setReceipts(newReceipts); setDailySalesRecords(newDailySalesRecords); setDailyExpenses(newDailyExpenses); setCashDeposits(newCashDeposits); setMonthlyOverheads(newMonthlyOverheads);
+        if (selectEl) selectEl.value = ""; alert(`ลบประวัติสำเร็จ! คืนพื้นที่คลาวด์เรียบร้อยแล้ว`);
       };
 
       const handleHardReset = () => {
@@ -707,6 +850,182 @@
 
       const triggerPrint = (data) => setPrintData(data);
       const toggleHistoryRow = (date) => setExpandedHistoryDate(expandedHistoryDate === date ? null : date);
+
+      // ===== DAILY SALES RECORD HELPERS =====
+
+      // คำนวณยอดขายรวมในวันนั้น
+      const calcDailySalesTotal = (record) => {
+        if (!record || record.closedDay) return 0;
+        const grabAmt = (record.grab?.after != null && record.grab?.after !== '') ? Number(record.grab.after) : Number(record.grab?.before || 0);
+        const linemanAmt = (record.lineman?.after != null && record.lineman?.after !== '') ? Number(record.lineman.after) : Number(record.lineman?.before || 0);
+        const creditTotal = (record.credits || []).reduce((s, c) => s + Number(c.amount || 0), 0);
+        return Number(record.cash || 0) + Number(record.transfer || 0) + grabAmt + linemanAmt + creditTotal;
+      };
+
+      // ยอดขายรวมของช่วงวัน (สำหรับ pending sales auto-fill)
+      const getSalesForRange = (startDateStr, endDateStr) => {
+        if (!startDateStr || !endDateStr) return { total: 0, covered: 0, total_days: 0 };
+        const startMs = parseDDMMYYYY(startDateStr);
+        const endMs = parseDDMMYYYY(endDateStr);
+        let dayCount = Math.round((endMs - startMs) / 86400000) + 1;
+        let total = 0; let covered = 0;
+        dailySalesRecords.forEach(r => {
+          const rMs = parseDDMMYYYY(r.date);
+          if (rMs >= startMs && rMs <= endMs) { total += calcDailySalesTotal(r); covered++; }
+        });
+        return { total, covered, total_days: dayCount };
+      };
+
+      // คำนวณ % ที่ถูกหักไป (Grab/Line Man commission)
+      const calcCommissionPct = (before, after) => {
+        const b = Number(before); const a = Number(after);
+        if (!b || !a || a >= b) return null;
+        return Math.round(((b - a) / b) * 100);
+      };
+
+      // รายชื่อ credit ที่เคยใช้ (derived)
+      const allCreditNames = useMemo(() => {
+        const names = new Set();
+        dailySalesRecords.forEach(r => (r.credits || []).forEach(c => { if (c.name?.trim()) names.add(c.name.trim()); }));
+        return [...names].sort((a, b) => a.localeCompare(b, 'th'));
+      }, [dailySalesRecords]);
+
+      // สร้าง daily cash flow data สำหรับหน้าจัดการเงินสด
+      const buildCashFlowData = useMemo(() => {
+        const today = formatDDMMYYYY(new Date());
+        // รวม dates ทั้งหมด (วันนี้ + วันที่มี dailySalesRecords)
+        const dateSet = new Set([today]);
+        dailySalesRecords.forEach(r => dateSet.add(formatDDMMYYYY(parseDDMMYYYY(r.date))));
+        cashDeposits.forEach(d => dateSet.add(formatDDMMYYYY(parseDDMMYYYY(d.date))));
+        dailyExpenses.forEach(e => { if (e.payMethod === 'เงินสด') dateSet.add(formatDDMMYYYY(parseDDMMYYYY(e.date))); });
+        // receipts ที่ชำระเป็นเงินสด
+        receipts.forEach(r => { 
+          if (r.method === 'เงินสด') {
+            if (r.paidAt) dateSet.add(formatDDMMYYYY(parseDDMMYYYY(r.paidAt)));
+            else dateSet.add(formatDDMMYYYY(parseDDMMYYYY(r.date)));
+          }
+        });
+        Object.keys(monthlyOverheads).forEach(mk => {
+          (getOverheadList ? getOverheadList(mk) : []).forEach(oh => {
+            if (oh.payDate && oh.payMethod === 'เงินสด') dateSet.add(formatDDMMYYYY(parseDDMMYYYY(oh.payDate)));
+          });
+        });
+
+        const sortedDates = [...dateSet].filter(d => !d.includes('NaN')).sort((a, b) => parseDDMMYYYY(b) - parseDDMMYYYY(a));
+
+        // ต้องคำนวณ running balance จากเก่าสุดไปใหม่สุด
+        const rows = sortedDates.map(date => {
+          const sr = dailySalesRecords.find(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === date);
+          const cashIncome = sr ? (Number(sr.cash || 0)) : 0; 
+          
+          const paidReceiptsTodayList = receipts.filter(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === date && r.method === 'เงินสด' && !r.paidAt);
+          const paidAPTodayList = receipts.filter(r => r.paidAt && formatDDMMYYYY(parseDDMMYYYY(r.paidAt)) === date && r.method === 'เงินสด');
+          
+          const paidReceiptsToday = paidReceiptsTodayList.reduce((s, r) => s + r.total, 0);
+          const paidAPToday = paidAPTodayList.reduce((s, r) => s + r.total, 0);
+          
+          let apDetails = '';
+          if (paidAPToday > 0 || paidReceiptsToday > 0) {
+            if (paidReceiptsToday > 0) apDetails += `จ่ายเงินสดวันรับของรวม: ${formatNumber(paidReceiptsToday)} บ.\n`;
+            if (paidAPToday > 0) {
+              apDetails += `ชำระหนี้ค้างรวม: ${formatNumber(paidAPToday)} บ.\n`;
+              paidAPTodayList.forEach(r => apDetails += `- จากบิลวันที่ ${r.date}: ${formatNumber(r.total)} บ.\n`);
+            }
+          }
+
+          const dailyExpCash = dailyExpenses.filter(e => formatDDMMYYYY(parseDDMMYYYY(e.date)) === date && (e.payMethod === 'เงินสด' || !e.payMethod)).reduce((s, e) => s + Number(e.amount), 0);
+          
+          let monthlyExpCash = 0;
+          Object.keys(monthlyOverheads).forEach(mk => {
+            (getOverheadList ? getOverheadList(mk) : []).forEach(oh => { 
+              if (oh.payDate && formatDDMMYYYY(parseDDMMYYYY(oh.payDate)) === date && oh.payMethod === 'เงินสด' && oh.actual) monthlyExpCash += Number(oh.actual); 
+            });
+          });
+          const deposit = cashDeposits.filter(d => formatDDMMYYYY(parseDDMMYYYY(d.date)) === date).reduce((s, d) => s + Number(d.amount), 0);
+          const netCash = cashIncome - paidReceiptsToday - paidAPToday - dailyExpCash - monthlyExpCash;
+          return { date, cashIncome, paidReceiptsToday, paidAPToday, dailyExpCash, monthlyExpCash, deposit, netCash, apDetails };
+        }).reverse(); // เรียงจากเก่าสุดก่อน เพื่อคำนวณ cumulative
+
+        let running = 0;
+        const withCumulative = rows.map(r => {
+          running += r.netCash - r.deposit;
+          return { ...r, cumulativeCash: running };
+        });
+
+        return withCumulative.reverse(); // กลับมาใหม่สุดบน
+      }, [dailySalesRecords, cashDeposits, dailyExpenses, receipts, monthlyOverheads]);
+
+      // โหลดข้อมูล record มาใส่ form เพื่อแก้ไข
+      const loadSalesRecordForEdit = (record) => {
+        setSrEditId(record.id);
+        setSalesRecordDate(record.date);
+        setSrCash(record.cash || '');
+        setSrTransfer(record.transfer || '');
+        setSrGrabBefore(record.grab?.before || '');
+        setSrGrabAfter(record.grab?.after != null ? record.grab.after : '');
+        setSrLinemanBefore(record.lineman?.before || '');
+        setSrLinemanAfter(record.lineman?.after != null ? record.lineman.after : '');
+        setSrCredits(record.credits?.length > 0 ? record.credits.map(c => ({name: c.name, amount: String(c.amount)})) : [{ name: '', amount: '' }]);
+      };
+
+      const resetSalesRecordForm = () => {
+        setSrEditId(null); setSrCash(''); setSrTransfer(''); setSrGrabBefore(''); setSrGrabAfter('');
+        setSrLinemanBefore(''); setSrLinemanAfter(''); setSrCredits([{ name: '', amount: '' }]);
+      };
+
+      // บันทึก/อัพเดต daily sales record
+      const saveDailySalesRecord = (closedDay = false) => {
+        const date = salesRecordDate;
+        if (!date) return alert('กรุณาเลือกวันที่');
+        const filteredCredits = srCredits.filter(c => c.name || Number(c.amount) > 0);
+        const record = {
+          id: srEditId || `dsr-${Date.now()}`,
+          date,
+          closedDay,
+          cash: Number(srCash) || 0,
+          transfer: Number(srTransfer) || 0,
+          grab: { before: Number(srGrabBefore) || 0, after: srGrabAfter !== '' ? Number(srGrabAfter) : null },
+          lineman: { before: Number(srLinemanBefore) || 0, after: srLinemanAfter !== '' ? Number(srLinemanAfter) : null },
+          credits: filteredCredits.map(c => ({ name: c.name.trim(), amount: Number(c.amount) || 0 })),
+        };
+        if (closedDay) { record.cash = 0; record.transfer = 0; record.grab = { before: 0, after: null }; record.lineman = { before: 0, after: null }; record.credits = []; }
+        setDailySalesRecords(prev => {
+          const exists = prev.find(r => r.id === record.id);
+          if (exists) return prev.map(r => r.id === record.id ? record : r);
+          // ตรวจว่าวันนั้นมีอยู่แล้วหรือไม่
+          const sameDayIdx = prev.findIndex(r => r.date === date);
+          if (sameDayIdx > -1) return prev.map((r, i) => i === sameDayIdx ? record : r);
+          return [...prev, record].sort((a, b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
+        });
+        resetSalesRecordForm();
+        // Auto-update pending dailyHistory records ที่มีช่วงวันครอบคลุมวันนั้น
+        setDailyHistory(prev => prev.map(h => {
+          if (h.sales === null && h.type === 'checked') {
+            const { total, covered } = getSalesForRange(h.startDate || h.date, h.endDate || h.date);
+            if (covered > 0) return { ...h, _autoSales: total };
+          }
+          return h;
+        }));
+      };
+
+      const deleteDailySalesRecord = (id) => {
+        if (!window.confirm('ลบบันทึกยอดขายวันนี้?')) return;
+        setDailySalesRecords(prev => prev.filter(r => r.id !== id));
+      };
+
+      // บันทึกยอดฝากเงิน
+      const saveDeposit = () => {
+        if (!cashMgmtDepositAmt || Number(cashMgmtDepositAmt) <= 0) return alert('กรุณาระบุยอดฝากเงิน');
+        const dep = { id: `dep-${Date.now()}`, date: cashMgmtDepositDate || getTodayFormatted(), amount: Number(cashMgmtDepositAmt), note: cashMgmtDepositNote.trim() };
+        setCashDeposits(prev => {
+          const exists = prev.find(d => d.date === dep.date);
+          if (exists) return prev.map(d => d.date === dep.date ? { ...d, amount: d.amount + dep.amount } : d);
+          return [...prev, dep];
+        });
+        setCashMgmtDepositAmt(''); setCashMgmtDepositNote('');
+        alert(`บันทึกฝากเงิน ${formatMoney(dep.amount)} บาท เรียบร้อย`);
+      };
+
 
       const ProfitLabel = ({val, pctVal}) => {
         const isLoss = val < 0;
@@ -914,6 +1233,7 @@
               {auth.role !== 'staff' && (<><button onClick={() => setActiveTab('purchase')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 ${activeTab === 'purchase' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>สั่งของ</button><button onClick={() => setActiveTab('recordPurchase')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 ${activeTab === 'recordPurchase' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>รับของ</button><button onClick={() => setActiveTab('manageItems')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 ${activeTab === 'manageItems' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>จัดเรียง</button><button onClick={() => setActiveTab('settings')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 ${activeTab === 'settings' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>ตั้งค่า</button></>)}
               <button onClick={() => setActiveTab('dailyCount')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 ${activeTab === 'dailyCount' ? 'border-red-600 text-red-600 bg-red-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>เช็คสต๊อก</button>
               {auth.role !== 'staff' && <button onClick={() => setActiveTab('history')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 ${activeTab === 'history' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>ประวัติ</button>}
+              {(auth.role === 'owner' || auth.role === 'manager') && <button onClick={() => setActiveTab('cashMgmt')} className={`shrink-0 px-4 py-3 text-[13px] font-bold border-b-2 relative ${activeTab === 'cashMgmt' ? 'border-green-600 text-green-600 bg-green-50/50' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>💵 เงินสด</button>}
             </div>
           </div>
 
@@ -926,18 +1246,162 @@
                     <div className="bg-yellow-500 px-4 py-3 flex justify-between items-center"><h3 className="font-bold text-white text-sm">⚠️ รอระบุยอดขาย ({pendingRecords.length} รอบ)</h3><span className="text-[10px] text-yellow-100 bg-yellow-600 px-2 py-0.5 rounded">เก่าสุดอยู่บนสุด</span></div>
                     <div className="divide-y divide-yellow-100 p-2 space-y-2 max-h-[300px] overflow-y-auto smooth-scroll">
                       {pendingRecords.map((record, index) => {
-                        const isOldest = index === pendingRecords.length - 1;
+                        const isOldest = index === 0; // เก่าสุดอยู่ตำแหน่ง 0 (เรียงจากเก่า-ใหม่) - ต้องกรอกเก่าก่อนเสมอ
                         const fallbackDateStr = record.endDate || record.date || getTodayFormatted();
                         return (
                           <div key={record.id} className={`p-3 rounded-lg border ${isOldest ? 'bg-white border-yellow-400 shadow-sm ring-1 ring-yellow-400' : 'bg-gray-50 border-gray-200 opacity-60'}`}>
                             <div className="flex justify-between items-center mb-2"><div><div className="font-bold text-sm text-gray-800">{record.days > 1 ? `รอบ: ${record.startDate} ถึง ${record.endDate}` : `รอบ: ${fallbackDateStr}`}</div><div className="text-[10px] text-gray-500">นับไปเมื่อสิ้นวันล่าสุด</div></div><div className="text-right"><div className="text-[10px] text-red-600 font-bold">ต้นทุนที่ใช้ไป (Food Cost)</div><div className="font-bold text-red-700">{formatMoney(record.totalUsedVal + record.totalWasteVal)} บ.</div></div></div>
-                            {isOldest ? (<div className="flex gap-2 items-stretch mt-2"><input type="number" placeholder="กรอกยอดขายของรอบนี้" value={pendingSalesInputs[record.id] || ''} onChange={(e) => setPendingSalesInputs({...pendingSalesInputs, [record.id]: e.target.value})} className="flex-1 p-2 border-2 border-yellow-300 rounded focus:outline-none focus:border-yellow-500 font-bold text-center text-sm" /><button onClick={() => savePendingSales(record.id)} className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold px-4 rounded shadow-sm text-xs transition-colors">บันทึกยอดขาย</button></div>) : (<div className="text-[10px] text-center text-gray-500 bg-gray-100 p-2 rounded mt-2 font-bold flex items-center justify-center gap-1"><span>🔒</span> กรุณาระบุยอดขายรอบเก่ากว่าก่อน</div>)}
+                            {isOldest ? (
+                              <div className="mt-2 space-y-2">
+                                {record._autoSales != null ? (
+                                  <div className="bg-green-50 border border-green-200 rounded-lg p-2">
+                                    <div className="flex justify-between items-center mb-1">
+                                      <span className="text-[10px] text-green-700 font-bold">📊 ยอดอัตโนมัติจากบันทึกยอดขายรายวัน</span>
+                                      <span className="text-[9px] text-green-600">{record._coveredDays}/{record._totalDays} วัน</span>
+                                    </div>
+                                    <div className="flex gap-2 items-center">
+                                      <span className="flex-1 text-center font-black text-green-800 text-lg">{formatMoney(record._autoSales)} บ.</span>
+                                      <button onClick={() => savePendingSales(record.id, record._autoSales)} className="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-1.5 rounded shadow-sm text-xs transition-colors">✓ ใช้ยอดนี้</button>
+                                    </div>
+                                    {record._coveredDays < record._totalDays && <p className="text-[9px] text-orange-600 mt-1">⚠️ ข้อมูลไม่ครบ {record._totalDays - record._coveredDays} วัน (ใช้ยอดที่บันทึกไว้)</p>}
+                                  </div>
+                                ) : null}
+                                <div className="flex gap-2 items-stretch">
+                                  <input type="number" placeholder={record._autoSales != null ? "หรือกรอกยอดเองด้านล่าง" : "กรอกยอดขายของรอบนี้"} value={pendingSalesInputs[record.id] || ''} onChange={(e) => setPendingSalesInputs({...pendingSalesInputs, [record.id]: e.target.value})} className="flex-1 p-2 border-2 border-yellow-300 rounded focus:outline-none focus:border-yellow-500 font-bold text-center text-sm" />
+                                  <button onClick={() => savePendingSales(record.id, null)} className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold px-4 rounded shadow-sm text-xs transition-colors">บันทึกยอดขาย</button>
+                                </div>
+                              </div>
+                            ) : (<div className="text-[10px] text-center text-gray-500 bg-gray-100 p-2 rounded mt-2 font-bold flex items-center justify-center gap-1"><span>🔒</span> กรุณาระบุยอดขายรอบเก่ากว่าก่อน</div>)}
                           </div>
                         );
                       })}
                     </div>
                   </div>
                 )}
+
+                {/* ===== Card: บันทึกยอดขายรายวัน ===== */}
+                {(() => {
+                  const existingRec = dailySalesRecords.find(r => r.date === salesRecordDate);
+                  const srGrabPct = calcCommissionPct(srGrabBefore, srGrabAfter);
+                  const srLinemanPct = calcCommissionPct(srLinemanBefore, srLinemanAfter);
+                  const currentTotal = (() => {
+                    const g = srGrabAfter !== '' ? Number(srGrabAfter) : Number(srGrabBefore||0);
+                    const l = srLinemanAfter !== '' ? Number(srLinemanAfter) : Number(srLinemanBefore||0);
+                    const c = srCredits.reduce((s,cr) => s+Number(cr.amount||0),0);
+                    return Number(srCash||0)+Number(srTransfer||0)+g+l+c;
+                  })();
+                  return (
+                    <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
+                      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-3 flex justify-between items-center">
+                        <h3 className="font-bold text-white text-sm">💰 บันทึกยอดขายรายวัน</h3>
+                        <span className="text-[9px] text-blue-100 bg-blue-700 px-2 py-0.5 rounded">⚠️ ยังไม่บันทึก Firebase</span>
+                      </div>
+                      <div className="p-4 space-y-3">
+                        {/* วันที่ + ปุ่มวันร้านปิด */}
+                        <div className="flex gap-2 items-center">
+                          <label className="text-xs font-bold text-gray-600 shrink-0">📅 วันที่:</label>
+                          <input type="date" value={salesRecordDate.split('/').length===3 ? `${salesRecordDate.split('/')[2]}-${salesRecordDate.split('/')[1]}-${salesRecordDate.split('/')[0]}` : salesRecordDate}
+                            onChange={e => { const d = e.target.value; if(d) { const p=d.split('-'); setSalesRecordDate(`${p[2]}/${p[1]}/${p[0]}`); const ex=dailySalesRecords.find(r=>r.date===`${p[2]}/${p[1]}/${p[0]}`); if(ex) loadSalesRecordForEdit(ex); else resetSalesRecordForm(); } }}
+                            className="flex-1 p-2 text-xs border border-blue-200 rounded-lg outline-none focus:border-blue-500 font-bold" />
+                          {existingRec && !srEditId && <button onClick={()=>loadSalesRecordForEdit(existingRec)} className="text-[10px] bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold hover:bg-blue-200">✏️ แก้ไข</button>}
+                          {srEditId && <button onClick={resetSalesRecordForm} className="text-[10px] bg-gray-100 text-gray-600 px-2 py-1 rounded font-bold hover:bg-gray-200">✕ ยกเลิก</button>}
+                        </div>
+                        {existingRec && !srEditId ? (
+                          /* แสดงข้อมูลที่บันทึกไว้ */
+                          <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                            {existingRec.closedDay ? (
+                              <div className="text-center text-gray-500 font-bold text-sm">🔒 วันร้านปิด (ยอดขาย 0)</div>
+                            ) : (
+                              <div className="space-y-1 text-xs">
+                                {existingRec.cash > 0 && <div className="flex justify-between"><span className="text-gray-600">💵 เงินสด</span><span className="font-bold">{formatMoney(existingRec.cash)} บ.</span></div>}
+                                {existingRec.transfer > 0 && <div className="flex justify-between"><span className="text-gray-600">🏦 โอน</span><span className="font-bold">{formatMoney(existingRec.transfer)} บ.</span></div>}
+                                {existingRec.grab?.before > 0 && <div className="flex justify-between"><span className="text-gray-600">🛵 Grab{calcCommissionPct(existingRec.grab?.before, existingRec.grab?.after) ? `(${calcCommissionPct(existingRec.grab?.before, existingRec.grab?.after)}%)` : '(%)'}</span><span className="font-bold">{formatMoney(existingRec.grab?.after ?? existingRec.grab?.before)} บ.</span></div>}
+                                {existingRec.lineman?.before > 0 && <div className="flex justify-between"><span className="text-gray-600">🛵 LINE MAN{calcCommissionPct(existingRec.lineman?.before, existingRec.lineman?.after) ? `(${calcCommissionPct(existingRec.lineman?.before, existingRec.lineman?.after)}%)` : '(%)'}</span><span className="font-bold">{formatMoney(existingRec.lineman?.after ?? existingRec.lineman?.before)} บ.</span></div>}
+                                {(existingRec.credits||[]).map((c,i) => c.amount > 0 && <div key={i} className="flex justify-between"><span className="text-gray-600">💳 Credit: {c.name}</span><span className="font-bold text-orange-600">{formatMoney(c.amount)} บ.</span></div>)}
+                                <div className="border-t border-blue-200 pt-1 flex justify-between font-black text-blue-800"><span>ยอดรวม</span><span>{formatMoney(calcDailySalesTotal(existingRec))} บ.</span></div>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          /* ฟอร์มกรอกข้อมูล */
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="bg-gray-50 p-2 rounded-lg border"><label className="text-[9px] font-bold text-gray-500 block mb-1">💵 เงินสด</label><input type="number" placeholder="0" value={srCash} onChange={e=>setSrCash(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-blue-400 font-bold text-center" /></div>
+                              <div className="bg-gray-50 p-2 rounded-lg border"><label className="text-[9px] font-bold text-gray-500 block mb-1">🏦 โอน</label><input type="number" placeholder="0" value={srTransfer} onChange={e=>setSrTransfer(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-blue-400 font-bold text-center" /></div>
+                            </div>
+                            {/* Grab */}
+                            <div className="bg-green-50 p-2 rounded-lg border border-green-100">
+                              <div className="flex items-center gap-1 mb-1">
+                                <span className="text-[10px] font-bold text-green-800">🛵 Grab{srGrabPct ? `(${srGrabPct}%)` : '(%)'}</span>
+                                {srGrabPct && <span className="text-[8px] text-green-600 ml-auto">หักไป {srGrabPct}%</span>}
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div><label className="text-[8px] text-gray-500">ก่อนหัก%คอม</label><input type="number" placeholder="0" value={srGrabBefore} onChange={e=>setSrGrabBefore(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-green-400 font-bold text-center" /></div>
+                                <div><label className="text-[8px] text-gray-500">หลังหัก%คอม (ยอดรับจริง)</label><input type="number" placeholder="ยังไม่ได้รับ" value={srGrabAfter} onChange={e=>setSrGrabAfter(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-green-400 font-bold text-center" /></div>
+                              </div>
+                            </div>
+                            {/* LINE MAN */}
+                            <div className="bg-lime-50 p-2 rounded-lg border border-lime-100">
+                              <div className="flex items-center gap-1 mb-1">
+                                <span className="text-[10px] font-bold text-lime-800">🛵 LINE MAN{srLinemanPct ? `(${srLinemanPct}%)` : '(%)'}</span>
+                                {srLinemanPct && <span className="text-[8px] text-lime-600 ml-auto">หักไป {srLinemanPct}%</span>}
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div><label className="text-[8px] text-gray-500">ก่อนหัก%คอม</label><input type="number" placeholder="0" value={srLinemanBefore} onChange={e=>setSrLinemanBefore(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-lime-400 font-bold text-center" /></div>
+                                <div><label className="text-[8px] text-gray-500">หลังหัก%คอม (ยอดรับจริง)</label><input type="number" placeholder="ยังไม่ได้รับ" value={srLinemanAfter} onChange={e=>setSrLinemanAfter(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-lime-400 font-bold text-center" /></div>
+                              </div>
+                            </div>
+                            {/* Credits */}
+                            <div className="bg-orange-50 p-2 rounded-lg border border-orange-100">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] font-bold text-orange-800">💳 Credit (ยังไม่ได้รับเงิน)</span>
+                                {srCredits.length < 3 && <button onClick={()=>setSrCredits([...srCredits, {name:'',amount:''}])} className="text-[9px] text-orange-600 font-bold hover:text-orange-800">+ เพิ่ม</button>}
+                              </div>
+                              {srCredits.map((cr, ci) => (
+                                <div key={ci} className="flex gap-2 mb-1 items-center">
+                                  <input type="text" list="credit-name-list" placeholder={`ชื่อ credit ${ci+1}`} value={cr.name} onChange={e=>setSrCredits(srCredits.map((c,i)=>i===ci?{...c,name:e.target.value}:c))} className="flex-1 p-1.5 text-xs border rounded outline-none focus:border-orange-400 font-medium" />
+                                  <datalist id="credit-name-list">{allCreditNames.map(n=><option key={n} value={n}/>)}</datalist>
+                                  <input type="number" placeholder="ยอด" value={cr.amount} onChange={e=>setSrCredits(srCredits.map((c,i)=>i===ci?{...c,amount:e.target.value}:c))} className="w-20 p-1.5 text-xs border rounded outline-none focus:border-orange-400 font-bold text-center" />
+                                  {srCredits.length > 1 && <button onClick={()=>setSrCredits(srCredits.filter((_,i)=>i!==ci))} className="text-red-400 font-bold text-sm">✕</button>}
+                                </div>
+                              ))}
+                            </div>
+                            {/* Total + Buttons */}
+                            <div className="bg-blue-600 rounded-lg p-3 flex justify-between items-center">
+                              <div><p className="text-[9px] text-blue-200">ยอดขายรวมวันนี้</p><p className="font-black text-white text-lg">{formatMoney(currentTotal)} บ.</p></div>
+                              <div className="flex gap-2">
+                                <button onClick={()=>saveDailySalesRecord(true)} className="bg-gray-600 hover:bg-gray-700 text-white text-[10px] font-bold px-3 py-1.5 rounded">🔒 ร้านปิด</button>
+                                <button onClick={()=>saveDailySalesRecord(false)} className="bg-white text-blue-700 hover:bg-blue-50 font-bold px-4 py-1.5 rounded text-xs shadow-sm">💾 บันทึก</button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        {/* ประวัติ 7 วันล่าสุด */}
+                        {dailySalesRecords.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-bold text-gray-500 mb-1">📋 ประวัติ 7 วันล่าสุด</p>
+                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                              {dailySalesRecords.slice(0,7).map(r => (
+                                <div key={r.id} className="flex items-center gap-2 text-xs bg-gray-50 rounded px-2 py-1 border border-gray-100">
+                                  <span className="font-bold text-gray-700 shrink-0 w-20">{r.date}</span>
+                                  {r.closedDay ? <span className="text-gray-400 flex-1">ร้านปิด</span> : (
+                                    <span className="text-blue-700 font-bold flex-1">{formatMoney(calcDailySalesTotal(r))} บ.
+                                      {r.grab?.before > 0 && <span className="ml-1 text-green-600 text-[9px]">Grab{calcCommissionPct(r.grab?.before, r.grab?.after) ? `(${calcCommissionPct(r.grab?.before, r.grab?.after)}%)` : '(%)'}</span>}
+                                      {r.lineman?.before > 0 && <span className="ml-1 text-lime-600 text-[9px]">LINE{calcCommissionPct(r.lineman?.before, r.lineman?.after) ? `(${calcCommissionPct(r.lineman?.before, r.lineman?.after)}%)` : '(%)'}</span>}
+                                      {(r.credits||[]).filter(c=>c.amount>0).map((c,i)=><span key={i} className="ml-1 text-orange-500 text-[9px]">💳{c.name}</span>)}
+                                    </span>
+                                  )}
+                                  <button onClick={()=>{ setSalesRecordDate(r.date); loadSalesRecordForEdit(r); }} className="text-blue-500 text-[9px] shrink-0 hover:text-blue-700">✏️</button>
+                                  <button onClick={()=>deleteDailySalesRecord(r.id)} className="text-red-400 text-[9px] shrink-0 hover:text-red-600">🗑</button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col">
@@ -947,7 +1411,16 @@
                     </div>
                     <div className="bg-orange-50 p-3 rounded-xl border border-orange-100">
                        <h3 className="text-xs font-bold text-orange-800 mb-2">💸 เพิ่มรายจ่ายจุกจิก (เช่น ค่าแก๊ส, ซื้อของเพิ่ม)</h3>
-                       <div className="flex gap-2 mb-2"><input type="text" list="exp-cat-list" placeholder="ค่าอะไร..." value={expenseInput.name} onChange={e=>setExpenseInput({...expenseInput, name: e.target.value})} className="flex-1 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-medium bg-white" /><datalist id="exp-cat-list">{expCats.map(c=><option key={c} value={c}/>)}</datalist><input type="number" placeholder="ยอดเงิน" value={expenseInput.amount} onChange={e=>setExpenseInput({...expenseInput, amount: e.target.value})} className="w-24 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-bold text-center" /><button onClick={() => handleAddExpense()} className="bg-orange-500 hover:bg-orange-600 text-white px-4 rounded-lg font-bold text-lg shadow-sm active:scale-95 transition-transform">+</button></div>
+                       <div className="flex gap-2 mb-2">
+                         <input type="text" list="exp-cat-list" placeholder="ค่าอะไร..." value={expenseInput.name} onChange={e=>setExpenseInput({...expenseInput, name: e.target.value})} className="flex-1 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-medium bg-white" />
+                         <datalist id="exp-cat-list">{expCats.map(c=><option key={c} value={c}/>)}</datalist>
+                         <input type="number" placeholder="ยอดเงิน" value={expenseInput.amount} onChange={e=>setExpenseInput({...expenseInput, amount: e.target.value})} className="w-24 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-bold text-center" />
+                         <select value={expenseInput.payMethod || 'เงินสด'} onChange={e=>setExpenseInput({...expenseInput, payMethod: e.target.value})} className="p-2 text-xs border rounded-lg outline-none bg-white font-bold text-gray-700">
+                           <option value="เงินสด">💵 สด</option>
+                           <option value="โอน">🏦 โอน</option>
+                         </select>
+                         <button onClick={() => handleAddExpense()} className="bg-orange-500 hover:bg-orange-600 text-white px-4 rounded-lg font-bold text-lg shadow-sm active:scale-95 transition-transform">+</button>
+                       </div>
                        <p className="text-[9px] text-orange-600 mt-2">* ค่าใช้จ่ายที่บันทึกตรงนี้ จะถูกนำไปหักออกจากกำไรขั้นต้น (Gross Profit) ของวันนั้นๆ อัตโนมัติ หากกรอกผิดสามารถไปลบได้ในตาราง 10 รอบล่าสุดด้านล่าง</p>
                     </div>
                   </div>
@@ -973,7 +1446,29 @@
                           <div className="p-3 bg-white border border-orange-200 rounded-lg shadow-inner text-[10px] animate-in slide-in-from-top-2">
                             <div className="grid grid-cols-2 gap-4">
                               <div><p className="font-bold text-gray-700 mb-1 border-b pb-1">รายเดือน {currentMonthData.isEstimate ? '(ประเมิน)' : ''}</p><ul className="space-y-1 text-gray-600">{currentMonthData.overheadList?.length > 0 ? currentMonthData.overheadList.map(o => ( <li key={o.id} className="flex justify-between"><span className="truncate pr-1">{o.name}</span><span className="font-medium text-gray-800 shrink-0">{formatMoney(o.actual || o.estimate)}</span></li> )) : <li className="text-gray-400 italic">ไม่มีรายการ</li>}</ul></div>
-                              <div><p className="font-bold text-gray-700 mb-1 border-b pb-1">รายวัน (รวมทั้งเดือน)</p><ul className="space-y-1 text-gray-600">{currentMonthData.expensesList?.length > 0 ? currentMonthData.expensesList.map(e => ( <li key={e.name} className="flex justify-between"><span className="truncate pr-1">{e.name}</span><span className="font-medium text-gray-800 shrink-0">{formatMoney(e.amount)}</span></li> )) : <li className="text-gray-400 italic">ไม่มีรายการ</li>}</ul></div>
+                              <div><p className="font-bold text-gray-700 mb-1 border-b pb-1">รายวัน (รวมทั้งเดือน)</p><ul className="space-y-1 text-gray-600">{currentMonthData.expensesList?.map(e => {
+                                                const rawExp = currentMonthData.rawExpenses ? currentMonthData.rawExpenses.find(x => x.name === e.name) : null;
+                                                const isEditing = rawExp && editingExpId === rawExp.id;
+                                                return (
+                                                  <li key={e.id || e.name} className="flex justify-between items-center group">
+                                                    <span className="truncate pr-2">- {e.name}</span>
+                                                    <div className="flex items-center gap-1 shrink-0">
+                                                      {isEditing ? (
+                                                        <>
+                                                          <input type="number" value={editingExpAmount} onChange={ev => setEditingExpAmount(ev.target.value)} className="w-20 p-0.5 border-2 border-orange-400 rounded text-center font-bold text-[10px] outline-none" autoFocus onKeyDown={ev => { if(ev.key==='Enter') handleUpdateExpense(rawExp.id, editingExpAmount); if(ev.key==='Escape') setEditingExpId(null); }} />
+                                                          <button onClick={() => handleUpdateExpense(rawExp.id, editingExpAmount)} className="text-green-600 hover:text-green-800 font-bold text-[9px] px-1 rounded bg-white border border-green-300 shadow-sm">บันทึก</button>
+                                                          <button onClick={() => setEditingExpId(null)} className="text-gray-400 hover:text-gray-600 font-bold text-[9px] px-1 rounded bg-white border shadow-sm">ยกเลิก</button>
+                                                        </>
+                                                      ) : (
+                                                        <>
+                                                          <span onClick={() => { if(rawExp) { setEditingExpId(rawExp.id); setEditingExpAmount(String(e.amount)); }}} className={`font-bold ${rawExp ? 'cursor-pointer hover:text-orange-600 hover:underline' : ''}`} title={rawExp ? 'คลิกเพื่อแก้ไขยอด' : ''}>{formatMoney(e.amount)} ฿</span>
+                                                          <button onClick={() => { if(window.confirm('ลบรายการใช้จ่ายนี้ออกจากประวัติ?')) { if (rawExp) handleDeleteExpense(rawExp.id); }}} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 font-bold px-1 rounded bg-white border shadow-sm transition-opacity">ลบ</button>
+                                                        </>
+                                                      )}
+                                                    </div>
+                                                  </li>
+                                                );
+                                              }) || <li className="text-gray-400 italic">ไม่มีรายการ</li>}</ul></div>
                             </div>
                           </div>
                         )}
@@ -1042,19 +1537,19 @@
                                       <div><div className="flex justify-between text-orange-700 font-bold mb-1 border-b border-gray-100 pb-1"><span title="ค่าเช่า, เงินเดือน ฯลฯ หารเฉลี่ยตามวัน">รายเดือนเฉลี่ย {item.isEstimate ? '(ประเมิน)' : ''}</span><span>{formatMoney(item.overhead)} <span className="text-[9px] text-orange-400 font-normal">({item.sales > 0 ? ((item.overhead/item.sales)*100).toFixed(1) : 0}%)</span></span></div></div>
                                       <div>
                                         <div className="flex justify-between text-orange-700 font-bold mb-1 border-b border-gray-100 pb-1"><span>จ่ายยิบย่อยรายวัน</span><span>{formatMoney(item.dailyExp)} <span className="text-[9px] text-orange-400 font-normal">({item.sales > 0 ? ((item.dailyExp/item.sales)*100).toFixed(1) : 0}%)</span></span></div>
-                                        {item.expensesList.length > 0 ? (
+                                        {item.rawExpenses.length > 0 ? (
                                           <ul className="pl-2 pr-2 py-1.5 bg-orange-50 text-[10px] text-gray-700 rounded-lg border border-orange-100 font-medium space-y-1">
-                                            {item.expensesList.map(e => (
+                                            {item.rawExpenses.map(e => (
                                               <li key={e.id} className="flex justify-between items-center group">
                                                 <span className="truncate pr-2">- {e.name}</span>
                                                 <div className="flex items-center gap-2 shrink-0">
                                                   <span>{formatMoney(e.amount)} ฿</span>
-                                                  <button onClick={() => {
-                                                      if(window.confirm('ลบรายการใช้จ่ายนี้ออกจากประวัติ?')) {
-                                                          const rawExp = item.rawExpenses.find(x => x.name === e.name);
-                                                          if (rawExp) handleDeleteExpense(rawExp.id);
-                                                      }
-                                                  }} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 font-bold px-1 rounded bg-white border shadow-sm transition-opacity">ลบ</button>
+                                                  {auth.role === 'owner' && (
+                                                    <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
+                                                      <button onClick={(ev) => { ev.stopPropagation(); setExpenseInput({ id: e.id, name: e.name, amount: e.amount, payMethod: e.payMethod || 'เงินสด' }); const dp = parseDDMMYYYY(e.date); setCountDate(`${dp.getFullYear()}-${String(dp.getMonth()+1).padStart(2,'0')}-${String(dp.getDate()).padStart(2,'0')}`); document.querySelector('.expenses-form')?.scrollIntoView({behavior: 'smooth'}); }} className="text-[10px] text-blue-600 hover:text-blue-800 bg-white border rounded px-1 shadow-sm">✏️ แก้ไข</button>
+                                                      <button onClick={(ev) => { ev.stopPropagation(); if(window.confirm('ลบรายจ่ายนี้?')) setDailyExpenses(dailyExpenses.filter(x=>x.id!==e.id)); }} className="text-[10px] text-red-600 hover:text-red-800 bg-white border rounded px-1 shadow-sm">🗑️ ลบ</button>
+                                                    </div>
+                                                  )}
                                                 </div>
                                               </li>
                                             ))}
@@ -1180,10 +1675,12 @@
                               {items.map(item => (
                                 <div key={item.id} className="flex flex-col sm:flex-row gap-2 sm:items-center bg-gray-50 p-2 rounded border border-gray-200">
                                    <div className="flex-1 font-bold text-xs text-gray-700">{item.name}</div>
-                                   <div className="flex gap-2 w-full sm:w-auto">
-                                     <div className="flex-1 sm:w-24"><label className="text-[8px] text-gray-500 block">ประเมิน</label><input type="number" value={item.estimate} onChange={(e) => handleUpdateOverheadItem(monthKey, item.id, 'estimate', e.target.value)} className="w-full p-1.5 text-xs border rounded bg-yellow-50 outline-none focus:border-yellow-500" /></div>
-                                     <div className="flex-1 sm:w-24"><label className="text-[8px] text-blue-600 block">จ่ายจริง</label><input type="number" placeholder="รอรอบบิล" value={item.actual === null ? '' : item.actual} onChange={(e) => handleUpdateOverheadItem(monthKey, item.id, 'actual', e.target.value)} className="w-full p-1.5 text-xs border rounded bg-blue-50 outline-none focus:border-blue-500" /></div>
-                                     <div className="flex items-end pb-1"><button onClick={() => handleDeleteOverheadItem(monthKey, item.id)} className="text-red-400 hover:text-red-600">❌</button></div>
+                                   <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+                                     <div className="flex-1 min-w-[70px] sm:w-20"><label className="text-[8px] text-gray-500 block">ประเมิน</label><input type="number" value={item.estimate} onChange={(e) => handleUpdateOverheadItem(monthKey, item.id, 'estimate', e.target.value)} className="w-full p-1.5 text-xs border rounded bg-yellow-50 outline-none focus:border-yellow-500" /></div>
+                                     <div className="flex-1 min-w-[70px] sm:w-20"><label className="text-[8px] text-blue-600 block">จ่ายจริง</label><input type="number" placeholder="รอรอบบิล" value={item.actual === null ? '' : item.actual} onChange={(e) => handleUpdateOverheadItem(monthKey, item.id, 'actual', e.target.value)} className="w-full p-1.5 text-xs border rounded bg-blue-50 outline-none focus:border-blue-500" /></div>
+                                     <div className="flex-1 min-w-[70px] sm:w-20"><label className="text-[8px] text-gray-600 block">วิธีชำระ</label><select value={item.payMethod || 'ค้างชำระ'} onChange={(e) => handleUpdateOverheadItem(monthKey, item.id, 'payMethod', e.target.value)} className="w-full p-1.5 text-xs border rounded bg-gray-50 outline-none"><option>ค้างชำระ</option><option>เงินสด</option><option>โอนเงิน</option></select></div>
+                                     <div className="flex-1 min-w-[90px] sm:w-28"><label className="text-[8px] text-gray-600 block">วันที่ชำระ</label><input type="date" value={item.payDate || ''} onChange={(e) => handleUpdateOverheadItem(monthKey, item.id, 'payDate', e.target.value)} className="w-full p-1.5 text-[10px] sm:text-xs border rounded bg-gray-50 outline-none" /></div>
+                                     <div className="flex items-end pb-1"><button onClick={() => handleDeleteOverheadItem(monthKey, item.id)} className="text-red-400 hover:text-red-600 pl-1">❌</button></div>
                                    </div>
                                 </div>
                               ))}
@@ -1358,9 +1855,18 @@
             {/* TAB: RECORD PURCHASE (รับของ) */}
             {activeTab === 'recordPurchase' && auth.role !== 'staff' && (
               <div className="space-y-4 animate-in fade-in">
-                <div className="flex bg-gray-200 rounded-lg p-1"><button onClick={() => setReceiptMode('record')} className={`flex-1 py-2 text-sm font-bold rounded-md transition-colors ${receiptMode === 'record' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📥 บันทึกรับของ</button><button onClick={() => setReceiptMode('history')} className={`flex-1 py-2 text-sm font-bold rounded-md transition-colors ${receiptMode === 'history' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📜 ประวัติรับของ</button></div>
+                <div className="flex bg-gray-200 rounded-lg p-1">
+                  <button onClick={() => setReceiptMode('record')} className={`flex-1 py-2 text-xs sm:text-sm font-bold rounded-md transition-colors ${receiptMode === 'record' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📥 บันทึกรับของ</button>
+                  <button onClick={() => setReceiptMode('history')} className={`flex-1 py-2 text-xs sm:text-sm font-bold rounded-md transition-colors ${receiptMode === 'history' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📜 ประวัติรับของ</button>
+                  <button onClick={() => { setReceiptMode('unpaid'); setApSelectedBills({}); }} className={`flex-1 py-2 text-xs sm:text-sm font-bold rounded-md transition-colors relative ${receiptMode === 'unpaid' ? 'bg-white shadow text-red-700' : 'text-gray-500 hover:text-gray-700'}`}>
+                    💳 ค้างชำระ
+                    {receipts.filter(r => r.method === 'ยังไม่ชำระ').length > 0 && (
+                      <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+                    )}
+                  </button>
+                </div>
 
-                {receiptMode === 'record' ? (
+                {receiptMode === 'record' && (
                   <>
                     {pendingPOs.length > 0 && (
                       <div className="bg-green-50 p-4 rounded-xl border border-green-200 shadow-sm animate-in slide-in-from-top-4">
@@ -1406,7 +1912,20 @@
 
                     {billItems.length > 0 && (
                       <div className="bg-white p-3 rounded-xl shadow-sm border border-gray-200 animate-in slide-in-from-bottom-4">
-                        <div className="flex justify-between items-center mb-3 border-b pb-2"><h3 className="font-bold text-gray-800 text-sm">บิลชั่วคราว ({billItems.length})</h3><select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className="p-1 text-xs bg-gray-50 border rounded-lg font-bold outline-none"><option>เงินสด</option><option>โอนเงิน</option><option>เครดิต</option></select></div>
+                        <div className="flex justify-between items-center mb-3 border-b pb-2">
+                          <h3 className="font-bold text-gray-800 text-sm">บิลชั่วคราว ({billItems.length})</h3>
+                          <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className={`p-1 text-xs border rounded-lg font-bold outline-none ${paymentMethod === 'ยังไม่ชำระ' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-gray-50'}`}>
+                            <option>เงินสด</option>
+                            <option>โอนเงิน</option>
+                            <option>เครดิต</option>
+                            <option>ยังไม่ชำระ</option>
+                          </select>
+                        </div>
+                        {paymentMethod === 'ยังไม่ชำระ' && (
+                          <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded-lg text-[10px] text-red-700 font-bold flex items-center gap-1">
+                            <span>⚠️</span> บิลนี้จะถูกเก็บไว้ในระบบค้างชำระ สามารถชำระภายหลังได้ในหน้า "💳 ค้างชำระ"
+                          </div>
+                        )}
                         <div className="space-y-2 mb-4">
                           {billItems.map((bItem) => {
                             const diff = bItem.price - bItem.oldPrice;
@@ -1433,7 +1952,8 @@
                       </div>
                     )}
                   </>
-                ) : (
+                )}
+                {receiptMode === 'history' && (
                   <div className="bg-white p-3 rounded-xl shadow-sm border border-gray-200">
                     <p className="text-[11px] text-gray-500 mb-3 bg-gray-50 p-2 rounded-lg border border-gray-200">* ประวัติรับของจะถูกจัดกลุ่มตามวันที่ สามารถกดที่วันที่เพื่อดูบิลทั้งหมด และกดพิมพ์สรุปรายวัน หรือ พิมพ์แยกบิลได้</p>
                     {Object.entries(receipts.reduce((acc, bill) => { (acc[bill.date] = acc[bill.date] || []).push(bill); return acc; }, {})).map(([date, billsOnDate]) => {
@@ -1499,6 +2019,194 @@
                     })}
                   </div>
                 )}
+
+                {/* ===== AP: หน้าจัดการบิลค้างชำระ ===== */}
+                {receiptMode === 'unpaid' && (() => {
+                  const unpaidBills = receipts.filter(r => r.method === 'ยังไม่ชำระ');
+                  const unpaidByVendor = {};
+                  unpaidBills.forEach(b => {
+                    if (!unpaidByVendor[b.vendor]) unpaidByVendor[b.vendor] = [];
+                    unpaidByVendor[b.vendor].push(b);
+                  });
+                  const sortedVendors = Object.keys(unpaidByVendor).sort((a, b) =>
+                    apSortMode === 'amount'
+                      ? unpaidByVendor[b].reduce((s,r) => s+r.total,0) - unpaidByVendor[a].reduce((s,r) => s+r.total,0)
+                      : a.localeCompare(b, 'th')
+                  );
+                  const totalUnpaid = unpaidBills.reduce((s,r) => s+r.total, 0);
+                  const selectedIds = Object.keys(apSelectedBills).filter(id => apSelectedBills[id]);
+                  const selectedTotal = selectedIds.reduce((sum,id) => { const b = receipts.find(r => String(r.id)===id); return sum+(b?b.total:0); }, 0);
+                  const selectedVendors = new Set(selectedIds.map(id => receipts.find(r => String(r.id)===id)?.vendor).filter(Boolean));
+
+                  return (
+                    <div className="animate-in fade-in space-y-3">
+                      {/* Summary Header */}
+                      <div className="bg-gradient-to-r from-red-600 to-red-500 p-4 rounded-xl shadow text-white">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-[10px] font-bold text-red-200">ยอดค้างชำระทั้งหมด</p>
+                            <p className="text-2xl font-black">{formatMoney(totalUnpaid)} <span className="text-sm font-normal text-red-200">บาท</span></p>
+                            <p className="text-[10px] text-red-200 mt-0.5">{unpaidBills.length} บิล จาก {sortedVendors.length} ร้านค้า</p>
+                          </div>
+                          {unpaidBills.length === 0 && <div className="text-[40px] opacity-50">✅</div>}
+                          {unpaidBills.length > 0 && <div className="text-[40px] opacity-40">💳</div>}
+                        </div>
+                      </div>
+
+                      {unpaidBills.length === 0 ? (
+                        <div className="text-center py-10 text-gray-400 font-bold bg-white rounded-xl border">
+                          <div className="text-4xl mb-3">🎉</div>
+                          <p>ไม่มีบิลค้างชำระในระบบ</p>
+                          <p className="text-[11px] mt-1 text-gray-300">เมื่อรับของแบบ "ยังไม่ชำระ" จะแสดงที่นี่</p>
+                        </div>
+                      ) : (
+                        <>
+                          {/* Sort Controls */}
+                          <div className="flex gap-2 items-center">
+                            <span className="text-[10px] text-gray-500 font-bold shrink-0">เรียงตาม:</span>
+                            <div className="flex bg-gray-100 p-1 rounded-lg flex-1 max-w-[260px]">
+                              <button onClick={() => setApSortMode('amount')} className={`flex-1 py-1.5 text-[11px] font-bold rounded-md transition-colors ${apSortMode==='amount' ? 'bg-white shadow text-red-700' : 'text-gray-500'}`}>💰 ยอดหนี้รวม (มากสุดบน)</button>
+                              <button onClick={() => setApSortMode('name')} className={`flex-1 py-1.5 text-[11px] font-bold rounded-md transition-colors ${apSortMode==='name' ? 'bg-white shadow text-blue-700' : 'text-gray-500'}`}>🔤 ชื่อร้าน (A→Z)</button>
+                            </div>
+                          </div>
+
+                          {/* Vendor List */}
+                          <div className="space-y-2">
+                            {sortedVendors.map(vendor => {
+                              const vendorBills = unpaidByVendor[vendor].sort((a,b) => {
+                                const da = parseDDMMYYYY(a.date); const db = parseDDMMYYYY(b.date);
+                                return db - da; // ใหม่สุดบนสุด
+                              });
+                              const vendorTotal = vendorBills.reduce((s,r) => s+r.total, 0);
+                              const vendorSelectedCount = vendorBills.filter(b => apSelectedBills[String(b.id)]).length;
+                              const isVendorExpanded = apExpandedVendor === vendor;
+
+                              return (
+                                <div key={vendor} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                                  {/* Vendor Header */}
+                                  <div
+                                    onClick={() => setApExpandedVendor(isVendorExpanded ? null : vendor)}
+                                    className={`p-3 flex justify-between items-center cursor-pointer transition-colors ${isVendorExpanded ? 'bg-red-50 border-b border-red-100' : 'hover:bg-gray-50'}`}
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <div className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center text-red-600 font-black text-sm shrink-0">
+                                        {vendor.charAt(0)}
+                                      </div>
+                                      <div>
+                                        <div className="font-bold text-gray-800 text-sm flex items-center gap-2">
+                                          {vendor}
+                                          {vendorSelectedCount > 0 && <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded-full">เลือก {vendorSelectedCount}</span>}
+                                        </div>
+                                        <div className="text-[10px] text-gray-500">{vendorBills.length} บิล</div>
+                                      </div>
+                                    </div>
+                                    <div className="text-right flex items-center gap-3">
+                                      <div>
+                                        <div className="text-[9px] text-gray-400 font-bold">ยอดค้างรวม</div>
+                                        <div className="font-black text-red-600 text-sm">{formatMoney(vendorTotal)} ฿</div>
+                                      </div>
+                                      <span className="text-gray-400 text-xs">{isVendorExpanded ? '▲' : '▼'}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Bill List (accordion) */}
+                                  {isVendorExpanded && (
+                                    <div className="divide-y divide-gray-100 bg-gray-50/50">
+                                      {vendorBills.map(bill => {
+                                        const isSelected = !!apSelectedBills[String(bill.id)];
+                                        const isBillExpanded = apExpandedBill === bill.id;
+                                        return (
+                                          <div key={bill.id} className={`transition-colors ${isSelected ? 'bg-blue-50' : ''}`}>
+                                            <div className="flex items-start p-3 gap-3">
+                                              {/* Checkbox */}
+                                              <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={() => toggleApBill(bill.id, vendor)}
+                                                className="mt-1 w-4 h-4 accent-blue-600 cursor-pointer shrink-0"
+                                              />
+                                              {/* Bill Info */}
+                                              <div
+                                                className="flex-1 cursor-pointer"
+                                                onClick={() => setApExpandedBill(isBillExpanded ? null : bill.id)}
+                                              >
+                                                <div className="flex justify-between items-start">
+                                                  <div>
+                                                    <div className="text-[11px] font-bold text-gray-800">{bill.date}</div>
+                                                    <div className="text-[9px] text-gray-400">{bill.items.length} รายการ <span className="ml-1">{isBillExpanded ? '▲ ซ่อน' : '▼ ดูรายละเอียด'}</span></div>
+                                                  </div>
+                                                  <div className="font-black text-gray-800 text-sm">{formatMoney(bill.total)} ฿</div>
+                                                </div>
+                                                {/* Bill Detail (expand) */}
+                                                {isBillExpanded && (
+                                                  <div className="mt-2 animate-in fade-in">
+                                                    <table className="w-full text-[10px] border border-gray-200 rounded bg-white overflow-hidden">
+                                                      <thead className="bg-gray-100 text-gray-600 font-bold">
+                                                        <tr>
+                                                          <th className="p-1.5 text-left">รายการ</th>
+                                                          <th className="p-1.5 text-center">จำนวน</th>
+                                                          <th className="p-1.5 text-right">ราคา/หน่วย</th>
+                                                          <th className="p-1.5 text-right">รวม</th>
+                                                        </tr>
+                                                      </thead>
+                                                      <tbody className="divide-y divide-gray-100">
+                                                        {bill.items.map((bi, idx) => (
+                                                          <tr key={idx} className="hover:bg-gray-50">
+                                                            <td className="p-1.5 font-medium text-gray-700">{getItemName(bi.item)}</td>
+                                                            <td className="p-1.5 text-center">{formatNumber(bi.qty)} {bi.item.purchaseUnit||bi.item.unit}</td>
+                                                            <td className="p-1.5 text-right">{formatNumber(bi.price)} ฿</td>
+                                                            <td className="p-1.5 text-right font-bold text-blue-700">{formatMoney(bi.total)}</td>
+                                                          </tr>
+                                                        ))}
+                                                      </tbody>
+                                                      <tfoot className="bg-gray-50 border-t border-gray-300 font-bold">
+                                                        <tr>
+                                                          <td colSpan="3" className="p-1.5 text-right text-gray-700">รวมทั้งบิล:</td>
+                                                          <td className="p-1.5 text-right text-blue-700">{formatMoney(bill.total)} ฿</td>
+                                                        </tr>
+                                                      </tfoot>
+                                                    </table>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {/* Sticky Payment Footer */}
+                          {selectedIds.length > 0 && (
+                            <div className="sticky bottom-0 bg-white border border-blue-200 rounded-xl shadow-lg p-3 animate-in slide-in-from-bottom-4 z-20">
+                              <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+                                <div className="flex-1">
+                                  <div className="text-[10px] text-gray-500 font-bold">เลือกแล้ว {selectedIds.length} บิล จากร้าน: <span className="text-blue-700">{[...selectedVendors].join(', ')}</span></div>
+                                  <div className="text-xl font-black text-blue-700">{formatMoney(selectedTotal)} <span className="text-sm font-normal text-gray-500">บาท</span></div>
+                                </div>
+                                <div className="flex gap-2 items-center flex-wrap">
+                                  <input type="date" value={apPayDate} onChange={e => setApPayDate(e.target.value)} className="p-1.5 text-[10px] sm:text-xs border rounded-lg bg-gray-50 outline-none" />
+                                  <select value={apPayMethod} onChange={e => setApPayMethod(e.target.value)} className="p-2 text-xs border rounded-lg font-bold bg-gray-50 outline-none">
+                                    <option>เงินสด</option>
+                                    <option>โอนเงิน</option>
+                                  </select>
+                                  <button onClick={handleMarkAsPaid} className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-4 py-2.5 rounded-lg shadow-md text-sm transition-colors active:scale-95">
+                                    ✅ ชำระเงิน
+                                  </button>
+                                  <button onClick={() => setApSelectedBills({})} className="text-gray-500 hover:text-gray-700 text-xs font-bold px-2">ยกเลิก</button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -1609,7 +2317,6 @@
                                     <div className="p-2 sm:p-3 border-l-4 border-blue-500 overflow-x-auto">
                                       {auth.role === 'owner' && (
                                         <div className="mb-3 flex justify-end gap-2">
-                                          {!isPending && <button onClick={() => revertSalesOnly(day.id)} className="text-[10px] bg-white border border-yellow-300 text-yellow-700 px-3 py-1.5 rounded font-bold shadow-sm hover:bg-yellow-50 transition-colors flex items-center">✏️ ปลดล็อกเพื่อแก้ยอดขาย</button>}
                                           <button onClick={() => revertPendingSubmission(day.id)} className="text-[10px] bg-white border border-red-300 text-red-600 px-3 py-1.5 rounded font-bold shadow-sm hover:bg-red-50 transition-colors flex items-center">⚠️ ยกเลิกเพื่อแก้ไขสต๊อกย้อนหลัง</button>
                                         </div>
                                       )}
@@ -1788,6 +2495,98 @@
               </div>
             )}
           </div>
+
+          {/* ===== TAB: หน้าจัดการเงินสด ===== */}
+          {activeTab === 'cashMgmt' && (auth.role === 'owner' || auth.role === 'manager') && (
+            <div className="space-y-4 animate-in fade-in">
+              {/* Header Summary */}
+              <div className="bg-gradient-to-r from-green-600 to-emerald-600 rounded-xl p-4 text-white shadow-lg">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <p className="text-[10px] text-green-200 font-bold">เงินสดสะสมล่าสุด</p>
+                    <p className="text-3xl font-black">{formatMoney(buildCashFlowData[0]?.cumulativeCash ?? 0)} <span className="text-sm font-normal">บ.</span></p>
+                    <p className="text-[9px] text-green-300 mt-1">⚠️ ข้อมูลยังไม่บันทึก Firebase — จะหายหากรีเฟรชหน้า</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] text-green-200">วันนี้: {getTodayFormatted()}</p>
+                    <p className="text-[10px] text-green-200 mt-1">รวม {buildCashFlowData.length} วัน</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* ฟอร์มบันทึกฝากเงิน */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+                <h3 className="font-bold text-gray-700 text-sm mb-3 flex items-center"><span className="w-2 h-5 bg-green-500 rounded-full mr-2"></span>🏦 บันทึกฝากเงิน</h3>
+                <div className="flex gap-2 items-center flex-wrap">
+                  <input type="date"
+                    value={cashMgmtDepositDate.split('/').length===3 ? `${cashMgmtDepositDate.split('/')[2]}-${cashMgmtDepositDate.split('/')[1]}-${cashMgmtDepositDate.split('/')[0]}` : cashMgmtDepositDate}
+                    onChange={e => { const p=e.target.value.split('-'); setCashMgmtDepositDate(`${p[2]}/${p[1]}/${p[0]}`); }}
+                    className="p-2 text-xs border rounded-lg outline-none focus:border-green-400 font-bold" />
+                  <input type="number" placeholder="ยอดฝากเงิน (บาท)" value={cashMgmtDepositAmt} onChange={e=>setCashMgmtDepositAmt(e.target.value)} className="flex-1 p-2 text-xs border rounded-lg outline-none focus:border-green-400 font-bold text-center min-w-28" />
+                  <input type="text" placeholder="หมายเหตุ (ถ้ามี)" value={cashMgmtDepositNote} onChange={e=>setCashMgmtDepositNote(e.target.value)} className="flex-1 p-2 text-xs border rounded-lg outline-none focus:border-green-400 min-w-24" />
+                  <button onClick={saveDeposit} className="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-2 rounded-lg text-xs shadow-sm transition-colors">+ บันทึกฝากเงิน</button>
+                </div>
+              </div>
+
+              {/* ตารางกระแสเงินสดรายวัน */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="bg-gray-800 px-4 py-3"><h3 className="font-bold text-white text-sm">📊 กระแสเงินสดรายวัน (วันใหม่สุดอยู่บน)</h3></div>
+                {buildCashFlowData.length === 0 ? (
+                  <div className="p-8 text-center text-gray-400">
+                    <div className="text-4xl mb-2">💵</div>
+                    <p className="font-bold text-sm">ยังไม่มีข้อมูล</p>
+                    <p className="text-[11px] mt-1">เริ่มบันทึกยอดขายรายวันในหน้าภาพรวมก่อน</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[10px] sm:text-xs">
+                      <thead className="bg-gray-50 border-b border-gray-200">
+                        <tr>
+                          <th className="p-2 text-left font-bold text-gray-600">วันที่</th>
+                          <th className="p-2 text-right font-bold text-green-700">เงินสดรับ</th>
+                          <th className="p-2 text-right font-bold text-red-600">จ่ายของสด</th>
+                          <th className="p-2 text-right font-bold text-orange-600">จ่ายรายวัน</th>
+                          <th className="p-2 text-right font-bold text-orange-600">จ่ายรายเดือน</th>
+                          <th className="p-2 text-right font-bold text-blue-700">สุทธิ</th>
+                          <th className="p-2 text-right font-bold text-purple-600">ฝากเงิน</th>
+                          <th className="p-2 text-right font-bold text-gray-800">สะสม</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {buildCashFlowData.map((row, idx) => {
+                          const isToday = row.date === getTodayFormatted();
+                          const totalOut = row.paidReceiptsToday + row.paidAPToday + row.dailyExpCash + row.monthlyExpCash;
+                          return (
+                            <tr key={row.date} className={`${isToday ? 'bg-blue-50 border-l-4 border-l-blue-400' : ''} hover:bg-gray-50`}>
+                              <td className="p-2 font-bold text-gray-700">{row.date}{isToday && <span className="ml-1 text-[8px] bg-blue-100 text-blue-700 px-1 rounded font-bold">วันนี้</span>}</td>
+                              <td className="p-2 text-right text-green-700 font-bold">{row.cashIncome > 0 ? `+${formatMoney(row.cashIncome)}` : '-'}</td>
+                              <td className="p-2 text-right text-red-500" title={row.apDetails}>{(row.paidReceiptsToday + row.paidAPToday) > 0 ? `-${formatMoney(row.paidReceiptsToday + row.paidAPToday)}` : '-'}</td>
+                              <td className="p-2 text-right text-orange-500">{row.dailyExpCash > 0 ? `-${formatMoney(row.dailyExpCash)}` : '-'}</td>
+                              <td className="p-2 text-right text-orange-500">{row.monthlyExpCash > 0 ? `-${formatMoney(row.monthlyExpCash)}` : '-'}</td>
+                              <td className={`p-2 text-right font-bold ${row.netCash >= 0 ? 'text-blue-700' : 'text-red-600'}`}>{row.netCash >= 0 ? `+${formatMoney(row.netCash)}` : formatMoney(row.netCash)}</td>
+                              <td className="p-2 text-right text-purple-600">{row.deposit > 0 ? `-${formatMoney(row.deposit)}` : '-'}</td>
+                              <td className={`p-2 text-right font-black ${row.cumulativeCash >= 0 ? 'text-gray-800' : 'text-red-700'}`}>{formatMoney(row.cumulativeCash)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* หมายเหตุ */}
+              <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3">
+                <p className="text-[10px] font-bold text-yellow-800 mb-1">📝 หมายเหตุ</p>
+                <ul className="text-[9px] text-yellow-700 space-y-0.5">
+                  <li>• <strong>เงินสดรับ</strong>: ยอด "เงินสด" จากบันทึกยอดขายรายวันเท่านั้น (ไม่รวมโอน/Grab/Lineman/Credit)</li>
+                  <li>• <strong>จ่ายของสด</strong>: บิลรับของที่ชำระ "เงินสด" (รวมทั้งชำระแล้วในวันนั้นและค้างชำระที่เพิ่งชำระ)</li>
+                  <li>• <strong>จ่ายรายวัน</strong>: ค่าใช้จ่ายจุกจิกที่เลือก "เงินสด" เท่านั้น</li>
+                  <li>• <strong>⚠️ ข้อมูลนี้ยังไม่บันทึก Firebase</strong> กรุณาแจ้งเพื่อเปิดใช้งานการบันทึกถาวร</li>
+                </ul>
+              </div>
+            </div>
+          )}
 
           {/* ================= MODALS ================= */}
           {showWasteModal && (
