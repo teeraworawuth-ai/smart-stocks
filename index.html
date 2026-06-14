@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -51,10 +50,14 @@
     const getTodayFormatted = () => new Date().toISOString().split('T')[0];
     const parseDDMMYYYY = (str) => { 
       if(!str) return new Date(); 
-      if(str.includes('-')) { const [y, m, d] = str.split('-'); return new Date(y, m - 1, d); }
-      const [d, m, y] = str.split('/'); return new Date(y, m - 1, d); 
+      if(str.includes('-')) { 
+        const parts = str.split('-'); 
+        if (parts[0].length === 4) { let y = Number(parts[0]); if(y > 2500) y -= 543; return new Date(y, parts[1] - 1, parts[2]); }
+        else { let y = Number(parts[2]); if(y > 2500) y -= 543; return new Date(y, parts[1] - 1, parts[0]); }
+      }
+      let [d, m, y] = str.split('/'); y = Number(y); if(y > 2500) y -= 543; return new Date(y, m - 1, d); 
     };
-    const formatDDMMYYYY = (dateObj) => `${String(dateObj.getDate()).padStart(2, '0')}/${String(dateObj.getMonth() + 1).padStart(2, '0')}/${dateObj.getFullYear()}`;
+    const formatDDMMYYYY = (dateObj) => `${String(dateObj.getDate()).padStart(2, '0')}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${dateObj.getFullYear()}`;
     const pctValue = (val, base) => base > 0 ? ((val / base) * 100).toFixed(1) : 0;
 
     const compressData = (dataObj) => {
@@ -625,7 +628,7 @@
         const isEditing = !!editReceiptModal; const updatedInventory = [...inventory];
         if (isEditing) { const oldBill = receipts.find(r => r.id === editReceiptModal.id); if (oldBill) { oldBill.items.forEach(oldItem => { const invIdx = updatedInventory.findIndex(i => i.id === oldItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].currentStock -= (oldItem.qty * updatedInventory[invIdx].conversionRate); } }); } }
         billItems.forEach(bItem => { const invIdx = updatedInventory.findIndex(i => i.id === bItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].lastPrice = bItem.price; updatedInventory[invIdx].vendor = selectedVendor; updatedInventory[invIdx].currentStock += (bItem.qty * updatedInventory[invIdx].conversionRate); updatedInventory[invIdx].lastMoved = getTodayFormatted(); } });
-        const newBill = { id: isEditing ? editReceiptModal.id : Date.now(), date: isEditing ? editReceiptModal.date : new Date().toLocaleDateString('th-TH'), vendor: selectedVendor, method: paymentMethod, total: billItems.reduce((sum, item) => sum + item.total, 0), items: [...billItems] };
+        const newBill = { id: isEditing ? editReceiptModal.id : Date.now(), date: isEditing ? editReceiptModal.date : formatDDMMYYYY(new Date()), vendor: selectedVendor, method: paymentMethod, total: billItems.reduce((sum, item) => sum + item.total, 0), items: [...billItems] };
         if (isEditing) { setReceipts(receipts.map(r => r.id === newBill.id ? newBill : r)); setEditReceiptModal(null); alert(`แก้ไขบิลรับของเรียบร้อย`); } 
         else { setReceipts([newBill, ...receipts]); alert(`บันทึกรับของเรียบร้อย`); }
         setInventory(updatedInventory); setBillItems([]); 
@@ -1052,7 +1055,7 @@
               {printData.type === 'dashboard_history' ? (
                 <div className="text-black">
                   <h1 className="text-center font-bold text-lg mb-1">รายงานภาพรวมยอดขายและต้นทุนล่าสุด</h1>
-                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {new Date().toLocaleDateString('th-TH')} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
+                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {formatDDMMYYYY(new Date())} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
                   <table className="w-full text-[10px] border-collapse">
                     <thead><tr className="bg-gray-200 border-b border-gray-400"><th className="p-2 text-left border border-gray-300">วันที่/รอบ</th><th className="p-2 text-right border border-gray-300">ยอดขาย</th><th className="p-2 text-right border border-gray-300">ต้นทุนขาย(Food Cost)</th><th className="p-2 text-right border border-gray-300">กำไรขั้นต้น(GP)</th><th className="p-2 text-right border border-gray-300">รายจ่าย/ค่าบริหาร</th><th className="p-2 text-right border border-gray-300">กำไร(ขาดทุน)สุทธิ</th></tr></thead>
                     <tbody>
@@ -1078,7 +1081,7 @@
               ) : printData.type === 'monthly_summary' ? (
                 <div className="text-black">
                   <h1 className="text-center font-bold text-lg mb-1">รายงานงบกำไรขาดทุนรายเดือน</h1>
-                  <p className="text-center text-[10px] mb-4 text-gray-600">ประจำเดือน: {printData.monthLabel} | พิมพ์: {new Date().toLocaleDateString('th-TH')} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
+                  <p className="text-center text-[10px] mb-4 text-gray-600">ประจำเดือน: {printData.monthLabel} | พิมพ์: {formatDDMMYYYY(new Date())} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
                   
                   <div className="space-y-4 text-sm">
                     {/* ยอดขายและต้นทุนวัตถุดิบ */}
@@ -1113,7 +1116,7 @@
               ) : printData.type === 'master_data' ? (
                 <div className="text-black">
                   <h1 className="text-center font-bold text-lg mb-1">รายงานรายชื่อวัตถุดิบ (Master Data)</h1>
-                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {new Date().toLocaleDateString('th-TH')} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
+                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {formatDDMMYYYY(new Date())} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
                   <table className="w-full text-[10px]"><thead className="bg-gray-200"><tr><th className="p-2 w-8 text-center border border-gray-300">ลำดับ</th><th className="p-2 text-left border border-gray-300">หมวดหมู่</th><th className="p-2 text-left border border-gray-300">ชื่อวัตถุดิบ</th><th className="p-2 w-16 text-center border border-gray-300">หน่วยนับ</th><th className="p-2 w-16 text-center border border-gray-300">หน่วยซื้อ</th><th className="p-2 text-left border border-gray-300">ร้านค้าประจำ</th><th className="p-2 w-16 text-center border border-gray-300">สถานะ</th></tr></thead>
                     <tbody>
                       {printData.data.map((item, idx) => ( <tr key={item.id} className={`border-b border-gray-200 ${item.isActive === false ? 'opacity-50' : ''}`}><td className="p-1 text-center border border-gray-300">{idx + 1}</td><td className="p-1 border border-gray-300">{item.category}</td><td className="p-1 font-bold border border-gray-300">{item.name}</td><td className="p-1 text-center border border-gray-300">{item.unit}</td><td className="p-1 text-center border border-gray-300">{item.purchaseUnit}</td><td className="p-1 border border-gray-300">{item.vendor || '-'}</td><td className="p-1 text-center border border-gray-300">{item.isActive !== false ? 'ใช้งาน' : 'ปิด'}</td></tr> ))}
@@ -1123,7 +1126,7 @@
               ) : printData.type === 'history_daily' ? (
                 <div className="text-black">
                   <h1 className="text-center font-bold text-lg mb-1">รายงานประวัติเช็คสต๊อกรายวัน</h1>
-                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {new Date().toLocaleDateString('th-TH')} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
+                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {formatDDMMYYYY(new Date())} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
                   <table className="w-full text-[10px]"><thead className="bg-gray-200"><tr><th className="p-2 text-left border border-gray-300">วันที่/รอบ</th><th className="p-2 text-right border border-gray-300">ยอดขาย</th><th className="p-2 text-right border border-gray-300">ต้นทุนใช้งาน</th><th className="p-2 text-right border border-gray-300">ต้นทุนของเสีย</th><th className="p-2 text-right border border-gray-300">กำไรขั้นต้น</th></tr></thead>
                     <tbody>
                       {printData.data.map((day, idx) => {
@@ -1137,7 +1140,7 @@
               ) : printData.type === 'all' || printData.type === 'vendor' ? (
                 <div className="text-black">
                   <h1 className="text-center font-bold text-lg mb-1">ใบสั่งซื้อวัตถุดิบ</h1>
-                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {new Date().toLocaleDateString('th-TH')} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
+                  <p className="text-center text-[10px] mb-4 text-gray-600">วันที่พิมพ์: {formatDDMMYYYY(new Date())} | สาขา: {branches.find(b=>b.id===selectedBranch)?.name}</p>
                   {(printData.type === 'vendor' ? [printData.vendor] : Object.keys(printData.data)).map(vendor => {
                     const items = printData.type === 'vendor' ? printData.items : printData.data[vendor];
                     return (
@@ -1421,8 +1424,29 @@
                          </select>
                          <button onClick={() => handleAddExpense()} className="bg-orange-500 hover:bg-orange-600 text-white px-4 rounded-lg font-bold text-lg shadow-sm active:scale-95 transition-transform">+</button>
                        </div>
-                       <p className="text-[9px] text-orange-600 mt-2">* ค่าใช้จ่ายที่บันทึกตรงนี้ จะถูกนำไปหักออกจากกำไรขั้นต้น (Gross Profit) ของวันนั้นๆ อัตโนมัติ หากกรอกผิดสามารถไปลบได้ในตาราง 10 รอบล่าสุดด้านล่าง</p>
+                       <p className="text-[9px] text-orange-600 mt-2">* ค่าใช้จ่ายที่บันทึกตรงนี้ จะถูกนำไปหักออกจากกำไรขั้นต้น (Gross Profit) ของวันนั้นๆ อัตโนมัติ หากกรอกผิดสามารถแก้ไขหรือลบในประวัติด้านล่างได้ทันที</p>
                     </div>
+                    {(() => {
+                      const tenDaysAgoObj = new Date(); tenDaysAgoObj.setDate(tenDaysAgoObj.getDate() - 10);
+                      const recentExp = dailyExpenses.filter(e => parseDDMMYYYY(e.date) >= tenDaysAgoObj).sort((a,b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
+                      return recentExp.length > 0 ? (
+                        <div className="mt-3 border-t border-gray-100 pt-3">
+                          <p className="text-[10px] font-bold text-gray-500 mb-2">📋 ประวัติค่าใช้จ่าย 10 วันล่าสุด</p>
+                          <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                            {recentExp.map(e => (
+                              <div key={e.id} className="flex items-center gap-2 text-xs bg-gray-50 rounded px-2 py-1.5 border border-gray-100 hover:bg-gray-100 transition-colors">
+                                <span className="font-bold text-gray-700 shrink-0 w-20">{e.date}</span>
+                                <span className="text-gray-700 flex-1 truncate">{e.name}</span>
+                                <span className="text-orange-600 font-bold">{formatMoney(e.amount)} บ.</span>
+                                <span className="text-[9px] text-gray-500 bg-white px-1 rounded border shadow-sm">{e.payMethod || 'เงินสด'}</span>
+                                <button onClick={(ev) => { ev.stopPropagation(); setExpenseInput({ id: e.id, name: e.name, amount: e.amount, payMethod: e.payMethod || 'เงินสด' }); const dp = parseDDMMYYYY(e.date); setCountDate(`${dp.getFullYear()}-${String(dp.getMonth()+1).padStart(2,'0')}-${String(dp.getDate()).padStart(2,'0')}`); }} className="text-[10px] text-blue-600 hover:text-blue-800 bg-white border rounded px-1.5 py-0.5 shadow-sm ml-1">✏️ แก้ไข</button>
+                                <button onClick={(ev) => { ev.stopPropagation(); if(window.confirm(`ยืนยันการลบ "${e.name}" ยอด ${e.amount} บาท?`)) setDailyExpenses(dailyExpenses.filter(x=>x.id!==e.id)); }} className="text-[10px] text-red-600 hover:text-red-800 bg-white border rounded px-1.5 py-0.5 shadow-sm">🗑️ ลบ</button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : <div className="mt-3 border-t border-gray-100 pt-3"><p className="text-[10px] font-bold text-gray-400 italic">ไม่มีประวัติใน 10 วันล่าสุด</p></div>;
+                    })()}
                   </div>
 
                   {auth.role === 'owner' && (
@@ -2508,7 +2532,7 @@
                     <p className="text-[9px] text-green-300 mt-1">⚠️ ข้อมูลยังไม่บันทึก Firebase — จะหายหากรีเฟรชหน้า</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[10px] text-green-200">วันนี้: {getTodayFormatted()}</p>
+                    <p className="text-[10px] text-green-200">วันที่: {formatDDMMYYYY(new Date())}</p>
                     <p className="text-[10px] text-green-200 mt-1">รวม {buildCashFlowData.length} วัน</p>
                   </div>
                 </div>
@@ -2554,7 +2578,7 @@
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {buildCashFlowData.map((row, idx) => {
-                          const isToday = row.date === getTodayFormatted();
+                          const isToday = row.date === formatDDMMYYYY(new Date());
                           const totalOut = row.paidReceiptsToday + row.paidAPToday + row.dailyExpCash + row.monthlyExpCash;
                           return (
                             <tr key={row.date} className={`${isToday ? 'bg-blue-50 border-l-4 border-l-blue-400' : ''} hover:bg-gray-50`}>
