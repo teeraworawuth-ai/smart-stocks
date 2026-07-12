@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
   <style>
@@ -49,7 +49,7 @@
     const getDaysAgo = (days) => { const d = new Date(); d.setDate(d.getDate() - days); return d.toISOString().split('T')[0]; };
     const getTodayFormatted = () => new Date().toISOString().split('T')[0];
     const parseDDMMYYYY = (str) => { 
-      if(!str) return new Date(); 
+      if(!str || typeof str !== 'string') return new Date(); 
       if(str.includes('-')) { 
         const parts = str.split('-'); 
         if (parts[0].length === 4) { let y = Number(parts[0]); if(y > 2500) y -= 543; return new Date(y, parts[1] - 1, parts[2]); }
@@ -215,14 +215,17 @@
                 else if (raw.inventory) { loadedData = raw; }
               }
               if (loadedData) {
-                setInventory(loadedData.inventory || []); setDailyHistory(loadedData.dailyHistory || []); setReceipts(loadedData.receipts || []);
+                const migD = (arr) => Array.isArray(arr) ? arr.filter(x => x).map(x => ({...x, date: (x.date && typeof x.date === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.date)) : x.date, endDate: (x.endDate && typeof x.endDate === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.endDate)) : x.endDate, startDate: (x.startDate && typeof x.startDate === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.startDate)) : x.startDate, lastMoved: (x.lastMoved && typeof x.lastMoved === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.lastMoved)) : x.lastMoved })) : [];
+                setInventory(Array.isArray(loadedData.inventory) ? loadedData.inventory.filter(x => x).map(x => ({...x, lastMoved: (x.lastMoved && typeof x.lastMoved === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.lastMoved)) : x.lastMoved})) : []); 
+                setDailyHistory(migD(loadedData.dailyHistory)); 
+                setReceipts(migD(loadedData.receipts));
                 if (loadedData.vendors) setVendors(loadedData.vendors); else setVendors(['ตลาดสด', 'Makro', 'ร้านเจ๊หมวย']); 
                 if (loadedData.categoryOrder) setCategoryOrder(loadedData.categoryOrder); else setCategoryOrder(['เนื้อสัตว์', 'อาหารทะเล', 'ผักสด', 'ของแห้ง', 'เครื่องปรุง', 'เครื่องดื่ม', 'อื่นๆ']);
-                setPendingPOs(loadedData.pendingPOs || []); 
-                setDailyExpenses((loadedData.dailyExpenses || []).filter(e => e.date && !isNaN(parseDDMMYYYY(e.date).getTime()))); 
+                setPendingPOs(migD(loadedData.pendingPOs)); 
+                setDailyExpenses(migD(loadedData.dailyExpenses).filter(e => e.date && !isNaN(parseDDMMYYYY(e.date).getTime()))); 
                 setMonthlyOverheads(loadedData.monthlyOverheads || {});
                 if (loadedData.expenseCategories) setExpCats(loadedData.expenseCategories); else setExpCats(['ค่าแก๊ส', 'น้ำแข็ง', 'ซื้อของจุกจิก', 'ค่าซ่อมบำรุง']);
-                setDailySalesRecords(loadedData.dailySalesRecords || []); setCashDeposits(loadedData.cashDeposits || []);
+                setDailySalesRecords(migD(loadedData.dailySalesRecords)); setCashDeposits(migD(loadedData.cashDeposits));
                 const bytes = isComp && docSnap.data().compressedPayload ? docSnap.data().compressedPayload.length : new TextEncoder().encode(JSON.stringify(loadedData)).length;
                 setDbSizeInfo({ kbLength: (bytes / 1024).toFixed(1), percentUsed: ((bytes / 1048576) * 100).toFixed(2), estDaysLeft: loadedData.dailyHistory?.length > 0 ? Math.floor((1048576 - bytes) / (bytes / loadedData.dailyHistory.length)) : 'N/A', isCompressed: isComp });
               } else {
@@ -335,35 +338,29 @@
       const shiftStockMatrix = (steps) => setStockMatrixOffset(prev => Math.max(0, Math.min(maxStockMatrixOffset, prev + steps)));
       const visibleStockDates = uniqueCheckedDates.slice(stockMatrixOffset, stockMatrixOffset + 10);
 
-      // pendingRecords: รอบที่ยังไม่ได้ลงยอดขาย (auto-enriched จาก dailySalesRecords)
-      const pendingRecords = useMemo(() => {
+      // completedRecords: Dynamic sales calculation
+      const completedRecords = useMemo(() => {
         return dailyHistory
-          .filter(h => h.sales === null && h.type === 'checked')
-          .sort((a, b) => parseDDMMYYYY(a.endDate || a.date) - parseDDMMYYYY(b.endDate || b.date))
+          .filter(h => h.type === 'checked')
+          .sort((a, b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date))
           .map(h => {
-            // คำนวณยอดขายอัตโนมัติจาก dailySalesRecords
-            let autoSales = null; let covered = 0; let totalDays = 0;
+            let autoSales = 0;
             if (dailySalesRecords.length > 0) {
               const startMs = parseDDMMYYYY(h.startDate || h.date);
               const endMs = parseDDMMYYYY(h.endDate || h.date);
-              totalDays = Math.round((endMs - startMs) / 86400000) + 1;
-              let total = 0;
               dailySalesRecords.forEach(r => {
                 const rMs = parseDDMMYYYY(r.date);
                 if (rMs >= startMs && rMs <= endMs) {
                   const grabAmt = (r.grab?.after != null && r.grab?.after !== '') ? Number(r.grab.after) : Number(r.grab?.before || 0);
                   const linemanAmt = (r.lineman?.after != null && r.lineman?.after !== '') ? Number(r.lineman.after) : Number(r.lineman?.before || 0);
                   const creditTotal = (r.credits || []).reduce((s, c) => s + Number(c.amount || 0), 0);
-                  total += Number(r.cash || 0) + Number(r.transfer || 0) + grabAmt + linemanAmt + creditTotal;
-                  covered++;
+                  autoSales += Number(r.cash || 0) + Number(r.transfer || 0) + grabAmt + linemanAmt + creditTotal;
                 }
               });
-              if (covered > 0) autoSales = total;
             }
-            return { ...h, _autoSales: autoSales, _coveredDays: covered, _totalDays: totalDays };
+            return { ...h, sales: autoSales };
           });
       }, [dailyHistory, dailySalesRecords]);
-      const completedRecords = useMemo(() => { return dailyHistory.filter(h => h.sales !== null && h.type === 'checked').sort((a, b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date)); }, [dailyHistory]);
       
       const getMonthlyStats = () => {
         const stats = {};
@@ -381,9 +378,9 @@
         });
 
         dailyExpenses.forEach(exp => {
-           const parts = exp.date.split('/');
-           if(parts.length === 3) {
-             const monthKey = `${parts[2]}-${parts[1]}`;
+           const d = parseDDMMYYYY(exp.date);
+           if (!isNaN(d.getTime())) {
+             const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
              if (stats[monthKey]) stats[monthKey].dailyExp += Number(exp.amount);
            }
         });
@@ -397,7 +394,11 @@
            stats[monthKey].overhead = totalOverhead; stats[monthKey].isEstimate = !isAllActual && overheadList.length > 0;
            
            const groupedExps = {};
-           dailyExpenses.filter(e => e.date.includes(`/${monthKey.split('-')[1]}/${monthKey.split('-')[0]}`)).forEach(e => { groupedExps[e.name] = (groupedExps[e.name] || 0) + Number(e.amount); });
+           dailyExpenses.filter(e => {
+             const d = parseDDMMYYYY(e.date);
+             if (isNaN(d.getTime())) return false;
+             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === monthKey;
+           }).forEach(e => { groupedExps[e.name] = (groupedExps[e.name] || 0) + Number(e.amount); });
            stats[monthKey].expensesList = Object.keys(groupedExps).map(name => ({ name, amount: groupedExps[name] })).sort((a,b) => b.amount - a.amount);
            stats[monthKey].overheadList = [...overheadList].sort((a,b) => (b.actual || b.estimate || 0) - (a.actual || a.estimate || 0));
         });
@@ -622,6 +623,13 @@
         if (item.lastPrice > 0) { const diff = Number(purchasePrice) - item.lastPrice; const pctV = ((diff / item.lastPrice) * 100).toFixed(1); if (diff > 0) priceNote = `แพงขึ้น +${pctV}%`; else if (diff < 0) priceNote = `ถูกลง ${Math.abs(pctV)}%`; }
         setBillItems([...billItems, { cartId: Date.now(), item, qty: Number(purchaseQty), price: Number(purchasePrice), total: Number(purchaseQty) * Number(purchasePrice), oldPrice: item.lastPrice, priceNote }]);
         setSelectedItem(''); setPurchaseQty(''); setPurchasePrice('');
+      };
+      
+      const handleVendorChange = (vendor) => {
+        if (billItems.length > 0 && vendor !== selectedVendor) {
+          if (!window.confirm("คุณมีรายการในบิลชั่วคราวแล้ว ยืนยันที่จะเปลี่ยนร้านค้าหรือไม่? (รายการเดิมจะคงอยู่แต่ถูกเปลี่ยนชื่อร้านค้า)")) return;
+        }
+        setSelectedVendor(vendor);
       };
       
       const handleSaveBill = () => {
@@ -1244,33 +1252,7 @@
             
             {activeTab === 'dashboard' && auth.role !== 'staff' && (
               <div className="space-y-4 animate-in fade-in">
-                {pendingRecords.length > 0 && (
-                  <div className="bg-yellow-50 rounded-xl shadow-sm border border-yellow-200 overflow-hidden mb-4">
-                    <div className="bg-yellow-500 px-4 py-3 flex justify-between items-center"><h3 className="font-bold text-white text-sm">⚠️ รอระบุยอดขาย ({pendingRecords.length} รอบ)</h3><span className="text-[10px] text-yellow-100 bg-yellow-600 px-2 py-0.5 rounded">เก่าสุดอยู่บนสุด</span></div>
-                    <div className="divide-y divide-yellow-100 p-2 space-y-2 max-h-[300px] overflow-y-auto smooth-scroll">
-                      {pendingRecords.map((record, index) => {
-                        const isOldest = index === 0; // เก่าสุดอยู่ตำแหน่ง 0 (เรียงจากเก่า-ใหม่) - ต้องกรอกเก่าก่อนเสมอ
-                        const fallbackDateStr = record.endDate || record.date || getTodayFormatted();
-                        return (
-                          <div key={record.id} className={`p-3 rounded-lg border ${isOldest ? 'bg-white border-yellow-400 shadow-sm ring-1 ring-yellow-400' : 'bg-gray-50 border-gray-200 opacity-60'}`}>
-                            <div className="flex justify-between items-center mb-2"><div><div className="font-bold text-sm text-gray-800">{record.days > 1 ? `รอบ: ${record.startDate} ถึง ${record.endDate}` : `รอบ: ${fallbackDateStr}`}</div><div className="text-[10px] text-gray-500">นับไปเมื่อสิ้นวันล่าสุด</div></div><div className="text-right"><div className="text-[10px] text-red-600 font-bold">ต้นทุนที่ใช้ไป (Food Cost)</div><div className="font-bold text-red-700">{formatMoney(record.totalUsedVal + record.totalWasteVal)} บ.</div></div></div>
-                            {isOldest ? (
-                              <div className="mt-2 space-y-2">
-                                {record._autoSales != null ? (
-                                  <div className="bg-green-50 border border-green-200 rounded-lg p-2">
-                                    <div className="flex justify-between items-center mb-1">
-                                      <span className="text-[10px] text-green-700 font-bold">📊 ยอดอัตโนมัติจากบันทึกยอดขายรายวัน</span>
-                                      <span className="text-[9px] text-green-600">{record._coveredDays}/{record._totalDays} วัน</span>
-                                    </div>
-                                    <div className="flex gap-2 items-center">
-                                      <span className="flex-1 text-center font-black text-green-800 text-lg">{formatMoney(record._autoSales)} บ.</span>
-                                      <button onClick={() => savePendingSales(record.id, record._autoSales)} className="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-1.5 rounded shadow-sm text-xs transition-colors">✓ ใช้ยอดนี้</button>
-                                    </div>
-                                    {record._coveredDays < record._totalDays && <p className="text-[9px] text-orange-600 mt-1">⚠️ ข้อมูลไม่ครบ {record._totalDays - record._coveredDays} วัน (ใช้ยอดที่บันทึกไว้)</p>}
-                                  </div>
-                                ) : null}
-                                <div className="flex gap-2 items-stretch">
-                                  <input type="number" placeholder={record._autoSales != null ? "หรือกรอกยอดเองด้านล่าง" : "กรอกยอดขายของรอบนี้"} value={pendingSalesInputs[record.id] || ''} onChange={(e) => setPendingSalesInputs({...pendingSalesInputs, [record.id]: e.target.value})} className="flex-1 p-2 border-2 border-yellow-300 rounded focus:outline-none focus:border-yellow-500 font-bold text-center text-sm" />
+                } className="flex-1 p-2 border-2 border-yellow-300 rounded focus:outline-none focus:border-yellow-500 font-bold text-center text-sm" />
                                   <button onClick={() => savePendingSales(record.id, null)} className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold px-4 rounded shadow-sm text-xs transition-colors">บันทึกยอดขาย</button>
                                 </div>
                               </div>
@@ -1414,15 +1396,19 @@
                     </div>
                     <div className="bg-orange-50 p-3 rounded-xl border border-orange-100">
                        <h3 className="text-xs font-bold text-orange-800 mb-2">💸 เพิ่มรายจ่ายจุกจิก (เช่น ค่าแก๊ส, ซื้อของเพิ่ม)</h3>
-                       <div className="flex gap-2 mb-2">
-                         <input type="text" list="exp-cat-list" placeholder="ค่าอะไร..." value={expenseInput.name} onChange={e=>setExpenseInput({...expenseInput, name: e.target.value})} className="flex-1 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-medium bg-white" />
-                         <datalist id="exp-cat-list">{expCats.map(c=><option key={c} value={c}/>)}</datalist>
-                         <input type="number" placeholder="ยอดเงิน" value={expenseInput.amount} onChange={e=>setExpenseInput({...expenseInput, amount: e.target.value})} className="w-24 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-bold text-center" />
-                         <select value={expenseInput.payMethod || 'เงินสด'} onChange={e=>setExpenseInput({...expenseInput, payMethod: e.target.value})} className="p-2 text-xs border rounded-lg outline-none bg-white font-bold text-gray-700">
-                           <option value="เงินสด">💵 สด</option>
-                           <option value="โอน">🏦 โอน</option>
-                         </select>
-                         <button onClick={() => handleAddExpense()} className="bg-orange-500 hover:bg-orange-600 text-white px-4 rounded-lg font-bold text-lg shadow-sm active:scale-95 transition-transform">+</button>
+                       <div className="flex flex-wrap sm:flex-nowrap gap-2 mb-2">
+                         <div className="flex-1 min-w-[140px]">
+                           <input type="text" list="exp-cat-list" placeholder="ค่าอะไร..." value={expenseInput.name} onChange={e=>setExpenseInput({...expenseInput, name: e.target.value})} className="w-full p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-medium bg-white" />
+                           <datalist id="exp-cat-list">{expCats.map(c=><option key={c} value={c}/>)}</datalist>
+                         </div>
+                         <div className="flex gap-2 flex-1 sm:flex-none">
+                           <input type="number" placeholder="ยอดเงิน" value={expenseInput.amount} onChange={e=>setExpenseInput({...expenseInput, amount: e.target.value})} className="w-full sm:w-24 p-2 text-xs border rounded-lg outline-none focus:border-orange-500 font-bold text-center" />
+                           <select value={expenseInput.payMethod || 'เงินสด'} onChange={e=>setExpenseInput({...expenseInput, payMethod: e.target.value})} className="p-2 text-xs border rounded-lg outline-none bg-white font-bold text-gray-700 shrink-0">
+                             <option value="เงินสด">💵 สด</option>
+                             <option value="โอน">🏦 โอน</option>
+                           </select>
+                           <button onClick={() => handleAddExpense()} className="bg-orange-500 hover:bg-orange-600 text-white px-4 rounded-lg font-bold text-lg shadow-sm active:scale-95 transition-transform shrink-0">+</button>
+                         </div>
                        </div>
                        <p className="text-[9px] text-orange-600 mt-2">* ค่าใช้จ่ายที่บันทึกตรงนี้ จะถูกนำไปหักออกจากกำไรขั้นต้น (Gross Profit) ของวันนั้นๆ อัตโนมัติ หากกรอกผิดสามารถแก้ไขหรือลบในประวัติด้านล่างได้ทันที</p>
                     </div>
@@ -1471,24 +1457,11 @@
                             <div className="grid grid-cols-2 gap-4">
                               <div><p className="font-bold text-gray-700 mb-1 border-b pb-1">รายเดือน {currentMonthData.isEstimate ? '(ประเมิน)' : ''}</p><ul className="space-y-1 text-gray-600">{currentMonthData.overheadList?.length > 0 ? currentMonthData.overheadList.map(o => ( <li key={o.id} className="flex justify-between"><span className="truncate pr-1">{o.name}</span><span className="font-medium text-gray-800 shrink-0">{formatMoney(o.actual || o.estimate)}</span></li> )) : <li className="text-gray-400 italic">ไม่มีรายการ</li>}</ul></div>
                               <div><p className="font-bold text-gray-700 mb-1 border-b pb-1">รายวัน (รวมทั้งเดือน)</p><ul className="space-y-1 text-gray-600">{currentMonthData.expensesList?.map(e => {
-                                                const rawExp = currentMonthData.rawExpenses ? currentMonthData.rawExpenses.find(x => x.name === e.name) : null;
-                                                const isEditing = rawExp && editingExpId === rawExp.id;
                                                 return (
-                                                  <li key={e.id || e.name} className="flex justify-between items-center group">
+                                                  <li key={e.name} className="flex justify-between items-center group">
                                                     <span className="truncate pr-2">- {e.name}</span>
                                                     <div className="flex items-center gap-1 shrink-0">
-                                                      {isEditing ? (
-                                                        <>
-                                                          <input type="number" value={editingExpAmount} onChange={ev => setEditingExpAmount(ev.target.value)} className="w-20 p-0.5 border-2 border-orange-400 rounded text-center font-bold text-[10px] outline-none" autoFocus onKeyDown={ev => { if(ev.key==='Enter') handleUpdateExpense(rawExp.id, editingExpAmount); if(ev.key==='Escape') setEditingExpId(null); }} />
-                                                          <button onClick={() => handleUpdateExpense(rawExp.id, editingExpAmount)} className="text-green-600 hover:text-green-800 font-bold text-[9px] px-1 rounded bg-white border border-green-300 shadow-sm">บันทึก</button>
-                                                          <button onClick={() => setEditingExpId(null)} className="text-gray-400 hover:text-gray-600 font-bold text-[9px] px-1 rounded bg-white border shadow-sm">ยกเลิก</button>
-                                                        </>
-                                                      ) : (
-                                                        <>
-                                                          <span onClick={() => { if(rawExp) { setEditingExpId(rawExp.id); setEditingExpAmount(String(e.amount)); }}} className={`font-bold ${rawExp ? 'cursor-pointer hover:text-orange-600 hover:underline' : ''}`} title={rawExp ? 'คลิกเพื่อแก้ไขยอด' : ''}>{formatMoney(e.amount)} ฿</span>
-                                                          <button onClick={() => { if(window.confirm('ลบรายการใช้จ่ายนี้ออกจากประวัติ?')) { if (rawExp) handleDeleteExpense(rawExp.id); }}} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 font-bold px-1 rounded bg-white border shadow-sm transition-opacity">ลบ</button>
-                                                        </>
-                                                      )}
+                                                      <span className="font-bold text-gray-800">{formatMoney(e.amount)} ฿</span>
                                                     </div>
                                                   </li>
                                                 );
@@ -1558,23 +1531,25 @@
                                   <div className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm">
                                     <div className="font-bold border-b-2 border-gray-800 pb-2 mb-2 text-gray-800 text-sm">หักค่าใช้จ่ายดำเนินการ (OPEX)</div>
                                     <div className="space-y-3">
-                                      <div><div className="flex justify-between text-orange-700 font-bold mb-1 border-b border-gray-100 pb-1"><span title="ค่าเช่า, เงินเดือน ฯลฯ หารเฉลี่ยตามวัน">รายเดือนเฉลี่ย {item.isEstimate ? '(ประเมิน)' : ''}</span><span>{formatMoney(item.overhead)} <span className="text-[9px] text-orange-400 font-normal">({item.sales > 0 ? ((item.overhead/item.sales)*100).toFixed(1) : 0}%)</span></span></div></div>
+                                      <div>
+                                        <div className="flex justify-between text-orange-700 font-bold mb-1 border-b border-gray-100 pb-1"><span title="ค่าเช่า, เงินเดือน ฯลฯ หารเฉลี่ยตามวัน">รายเดือนเฉลี่ย {item.isEstimate ? '(ประเมิน)' : ''}</span><span>{formatMoney(item.overhead)} <span className="text-[9px] text-orange-400 font-normal">({item.sales > 0 ? ((item.overhead/item.sales)*100).toFixed(1) : 0}%)</span></span></div>
+                                        <ul className="text-xs text-orange-600 space-y-1 pl-1">
+                                          {item.overheadList && item.overheadList.filter(o => o.amount > 0).map((o, idx) => (
+                                            <li key={idx} className="flex justify-between items-center group">
+                                              <span className="truncate pr-2">- {o.name}</span>
+                                              <span className="font-medium shrink-0">{formatMoney(o.amount)} บ.</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
                                       <div>
                                         <div className="flex justify-between text-orange-700 font-bold mb-1 border-b border-gray-100 pb-1"><span>จ่ายยิบย่อยรายวัน</span><span>{formatMoney(item.dailyExp)} <span className="text-[9px] text-orange-400 font-normal">({item.sales > 0 ? ((item.dailyExp/item.sales)*100).toFixed(1) : 0}%)</span></span></div>
-                                        {item.rawExpenses.length > 0 ? (
+                                        {item.expensesList.length > 0 ? (
                                           <ul className="pl-2 pr-2 py-1.5 bg-orange-50 text-[10px] text-gray-700 rounded-lg border border-orange-100 font-medium space-y-1">
-                                            {item.rawExpenses.map(e => (
-                                              <li key={e.id} className="flex justify-between items-center group">
+                                            {item.expensesList.map(e => (
+                                              <li key={e.name} className="flex justify-between items-center">
                                                 <span className="truncate pr-2">- {e.name}</span>
-                                                <div className="flex items-center gap-2 shrink-0">
-                                                  <span>{formatMoney(e.amount)} ฿</span>
-                                                  {auth.role === 'owner' && (
-                                                    <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
-                                                      <button onClick={(ev) => { ev.stopPropagation(); setExpenseInput({ id: e.id, name: e.name, amount: e.amount, payMethod: e.payMethod || 'เงินสด' }); const dp = parseDDMMYYYY(e.date); setCountDate(`${dp.getFullYear()}-${String(dp.getMonth()+1).padStart(2,'0')}-${String(dp.getDate()).padStart(2,'0')}`); document.querySelector('.expenses-form')?.scrollIntoView({behavior: 'smooth'}); }} className="text-[10px] text-blue-600 hover:text-blue-800 bg-white border rounded px-1 shadow-sm">✏️ แก้ไข</button>
-                                                      <button onClick={(ev) => { ev.stopPropagation(); if(window.confirm('ลบรายจ่ายนี้?')) setDailyExpenses(dailyExpenses.filter(x=>x.id!==e.id)); }} className="text-[10px] text-red-600 hover:text-red-800 bg-white border rounded px-1 shadow-sm">🗑️ ลบ</button>
-                                                    </div>
-                                                  )}
-                                                </div>
+                                                <span className="shrink-0">{formatMoney(e.amount)} ฿</span>
                                               </li>
                                             ))}
                                           </ul>
