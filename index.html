@@ -87,7 +87,7 @@
             <span className="truncate">{selectedItem ? (isVendor ? selectedItem : items.find(i=>i.id===selectedItem)?.name) : placeholder}</span>
             <svg className="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
           </div>
-          {isOpen && (
+          {isOpen && window.ReactDOM.createPortal(
             <div className="fixed inset-0 z-[9999] flex flex-col justify-end bg-gray-900/60 backdrop-blur-sm animate-in fade-in duration-200">
               <div className="bg-white w-full h-[75vh] sm:h-[85vh] rounded-t-2xl shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom-full duration-200">
                 <div className="p-4 border-b flex justify-between items-center bg-gray-50">
@@ -123,7 +123,7 @@
                 </div>
               </div>
             </div>
-          )}
+          ), document.body)}
         </>
       );
     }
@@ -1906,8 +1906,8 @@
 
                     <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
                       <div className="space-y-4">
-                        <div className="relative z-[50]"><label className="block text-xs font-bold text-gray-600 mb-1">1. บิลจากร้านค้า</label><SearchableDropdown items={vendors} selectedItem={selectedVendor} onSelect={setSelectedVendor} onAdd={handleAddVendor} onEdit={promptEditVendor} onDelete={handleDeleteVendor} placeholder="เลือกร้านค้า" isVendor={true} /></div>
-                        <div className="relative z-[40]"><label className="block text-xs font-bold text-gray-600 mb-1">2. ค้นหาสินค้า / วัตถุดิบ</label><SearchableDropdown items={inventory.filter(isItemVisible)} selectedItem={selectedItem} onSelect={(id) => { setSelectedItem(id); setPurchasePrice(inventory.find(i=>i.id===id)?.lastPrice||''); }} onAdd={(searchName) => openAddItem('recordPurchase', searchName)} onEdit={(item) => openEditItem(item, 'recordPurchase')} onDelete={handleDeleteItem} placeholder="เลือกวัตถุดิบ" isVendor={false} /></div>
+                        <div className="relative"><label className="block text-xs font-bold text-gray-600 mb-1">1. บิลจากร้านค้า</label><SearchableDropdown items={vendors} selectedItem={selectedVendor} onSelect={setSelectedVendor} onAdd={handleAddVendor} onEdit={promptEditVendor} onDelete={handleDeleteVendor} placeholder="เลือกร้านค้า" isVendor={true} /></div>
+                        <div className="relative"><label className="block text-xs font-bold text-gray-600 mb-1">2. ค้นหาสินค้า / วัตถุดิบ</label><SearchableDropdown items={inventory.filter(isItemVisible)} selectedItem={selectedItem} onSelect={(id) => { setSelectedItem(id); setPurchasePrice(inventory.find(i=>i.id===id)?.lastPrice||''); }} onAdd={(searchName) => openAddItem('recordPurchase', searchName)} onEdit={(item) => openEditItem(item, 'recordPurchase')} onDelete={handleDeleteItem} placeholder="เลือกวัตถุดิบ" isVendor={false} /></div>
 
                         <div className={`transition-all duration-300 ${selectedItem ? 'opacity-100 max-h-96' : 'opacity-40 max-h-0 overflow-hidden'}`}>
                           <div className="grid grid-cols-2 gap-3 mt-4">
