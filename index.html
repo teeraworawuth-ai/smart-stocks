@@ -33,10 +33,10 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { initializeFirestore, memoryLocalCache, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { initializeFirestore, memoryLocalCache, doc, getDoc, setDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
     import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     
-    window.FirebaseAPI = { initializeApp, initializeFirestore, memoryLocalCache, doc, getDoc, setDoc, onSnapshot, getAuth, signInAnonymously, onAuthStateChanged };
+    window.FirebaseAPI = { initializeApp, initializeFirestore, memoryLocalCache, doc, getDoc, setDoc, onSnapshot, collection, getAuth, signInAnonymously, onAuthStateChanged };
     window.isFirebaseLoaded = true;
     window.dispatchEvent(new Event('firebase-loaded'));
   </script>
@@ -128,6 +128,32 @@
       );
     }
 
+    // ===== Shared ingredient catalog with the Cost/Spec web app (ครัวแสนสุข) =====
+    // One Firestore doc per ingredient in `catalog_saensuk`. Each app writes only the fields it owns
+    // (merge), so neither app can overwrite the other's data or this app's main document.
+    const CATALOG_COL = 'catalog_saensuk';
+    const CATALOG_BRANCH = 'branch1';
+    const CODE_PREFIX = { 'อาหารทะเล': 'S', 'เนื้อสัตว์': 'M', 'ไข่และเต้าหู้': 'E', 'ข้าวและเส้น': 'R', 'ของแห้ง': 'D', 'ผักสด': 'V', 'เครื่องปรุง': 'C', 'เครื่องดื่ม': 'B', 'ขนม': 'K', 'อื่นๆ': 'O' };
+    const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+    const nextItemCode = (category, taken) => {
+      const p = CODE_PREFIX[category] || 'X'; let max = 0;
+      taken.forEach(code => { if (typeof code === 'string' && code.startsWith(p)) { const n = parseInt(code.slice(p.length), 10); if (!isNaN(n) && n > max) max = n; } });
+      const code = p + String(max + 1).padStart(3, '0'); taken.add(code); return code;
+    };
+    // Price per stock unit that the catalog says should be used (market / custom / confirmed bill)
+    const catalogPrice = (c) => {
+      if (!c) return null;
+      if (c.priceMode === 'custom' || c.priceMode === 'bill') return c.customPrice != null ? Number(c.customPrice) : (c.billPrice != null ? Number(c.billPrice) : null);
+      return c.marketPrice != null ? Number(c.marketPrice) : null;
+    };
+    const costUnitOf = (stockUnit) => stockUnit === 'กก.' ? { costUnit: 'g', factor: 1000 } : stockUnit === 'ลิตร' ? { costUnit: 'ml', factor: 1000 } : { costUnit: stockUnit, factor: 1 };
+    const pushCatalog = (id, fields) => {
+      try {
+        if (!window.firestoreInst || !window.FirebaseAPI) return;
+        window.FirebaseAPI.setDoc(window.FirebaseAPI.doc(window.firestoreInst, CATALOG_COL, id), fields, { merge: true }).catch(e => console.error('Catalog write failed', e));
+      } catch (e) { console.error('Catalog write failed', e); }
+    };
+
     function App() {
       const firebaseConfig = { apiKey: "AIzaSyCak5RHaVkjqN02MeWjvQ6HWA1EESEdeok", authDomain: "restaurant-stock-81615.firebaseapp.com", projectId: "restaurant-stock-81615" };
       const [db, setDb] = useState(null); const [isDataLoaded, setIsDataLoaded] = useState(false); const [isSyncActive, setIsSyncActive] = useState(false);
@@ -136,13 +162,14 @@
 
       const [auth, setAuth] = useState({ loggedIn: false, role: '', name: '' });
       const [loginPin, setLoginPin] = useState(''); const [activeTab, setActiveTab] = useState('dashboard');
-      const branches = [{ id: 'branch1', name: 'ครัวแสนสุข' }, { id: 'branch2', name: 'ครัวบ้านแม่' }, { id: 'demo', name: 'Demo (ทดลองใช้งาน)' }];
+      const branches = [{ id: 'branch1', name: 'ครัวแสนสุข' }];
       const [selectedBranch, setSelectedBranch] = useState('branch1');
       
       const [categoryOrder, setCategoryOrder] = useState([]); const [vendors, setVendors] = useState([]); const [expCats, setExpCats] = useState([]);
       const [newCategoryInput, setNewCategoryInput] = useState(''); const [newVendorInput, setNewVendorInput] = useState(''); const [newExpCat, setNewExpCat] = useState('');
       
       const [inventory, setInventory] = useState([]); const [dailyHistory, setDailyHistory] = useState([]);
+      const [catalog, setCatalog] = useState({}); const [catalogLoaded, setCatalogLoaded] = useState(false);
       const [receipts, setReceipts] = useState([]); const [pendingPOs, setPendingPOs] = useState([]); 
       const [dailyExpenses, setDailyExpenses] = useState([]); const [monthlyOverheads, setMonthlyOverheads] = useState({});
       
@@ -224,7 +251,7 @@
       };
 
       useEffect(() => {
-        let unsubscribeSnapshot = null; let isMounted = true;
+        let unsubscribeSnapshot = null; let unsubscribeCatalog = null; let isMounted = true;
         const initFirebase = async () => {
           try {
             while (!window.FirebaseAPI) { await new Promise(r => setTimeout(r, 100)); }
@@ -233,6 +260,12 @@
             setDb(window.firestoreInst); setIsSyncActive(false); 
             const user = await new Promise((resolve) => { const unsubAuth = onAuthStateChanged(window.firebaseAuthInst, async (u) => { unsubAuth(); if (u) resolve(u); else { try { const cred = await signInAnonymously(window.firebaseAuthInst); resolve(cred.user); } catch (e) { resolve(null); } } }); });
             if (!user || !isMounted) { setIsDataLoaded(true); return; }
+            if (selectedBranch === CATALOG_BRANCH) {
+              unsubscribeCatalog = onSnapshot(window.FirebaseAPI.collection(window.firestoreInst, CATALOG_COL), (snap) => {
+                const map = {}; snap.forEach(d => { map[d.id] = d.data(); });
+                setCatalog(map); setCatalogLoaded(true);
+              }, (err) => console.error('Catalog snapshot error', err));
+            }
             unsubscribeSnapshot = onSnapshot(doc(window.firestoreInst, "restaurant_data", selectedBranch), (docSnap) => {
               let loadedData = null; let isComp = false;
               if (docSnap.exists()) {
@@ -264,7 +297,7 @@
           } catch (error) { setIsDataLoaded(true); setIsSyncActive(false); }
         };
         initFirebase();
-        return () => { isMounted = false; if (unsubscribeSnapshot) unsubscribeSnapshot(); };
+        return () => { isMounted = false; if (unsubscribeSnapshot) unsubscribeSnapshot(); if (unsubscribeCatalog) unsubscribeCatalog(); };
       }, [selectedBranch]);
 
       useEffect(() => {
@@ -286,6 +319,48 @@
         const timer = setTimeout(saveToFirebase, 2500); 
         return () => clearTimeout(timer);
       }, [inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expCats, dailySalesRecords, cashDeposits, db, isSyncActive, selectedBranch, isDataLoaded]);
+
+      // Reconcile local inventory with the shared catalog: add new recipe ingredients, follow renames,
+      // follow market/custom prices set in the cost app, and give every item a code (stock-only display).
+      useEffect(() => {
+        if (!isDataLoaded || !isSyncActive || !catalogLoaded || selectedBranch !== CATALOG_BRANCH) return;
+        let changed = false;
+        const taken = new Set([...inventory.map(i => i.code), ...Object.values(catalog).map(c => c.code)].filter(Boolean));
+        let nextId = inventory.length > 0 ? Math.max(...inventory.map(i => Number(i.id) || 0)) + 1 : 1;
+        const next = inventory.map(i => {
+          let u = i;
+          const c = i.catalogId ? catalog[i.catalogId] : null;
+          if (c) {
+            if ((c.nameUpdatedAt || 0) > (i.nameSyncedAt || 0)) { u = { ...u, name: c.name || u.name, nameSyncedAt: c.nameUpdatedAt }; changed = true; }
+            if (c.code && c.code !== u.code) { u = { ...u, code: c.code }; changed = true; }
+            if (c.tag && c.tag !== u.costTag) { u = { ...u, costTag: c.tag }; changed = true; }
+            const p = catalogPrice(c);
+            if (p != null && c.priceMode !== 'bill' && (c.priceUpdatedAt || 0) > (i.priceSyncedAt || 0)) {
+              u = { ...u, lastPrice: round2(p * (Number(u.conversionRate) || 1)), priceSource: c.priceMode, priceSyncedAt: c.priceUpdatedAt }; changed = true;
+            } else if (c.priceMode === 'bill' && (c.priceUpdatedAt || 0) > (i.priceSyncedAt || 0)) {
+              u = { ...u, priceSource: 'bill', priceSyncedAt: c.priceUpdatedAt }; changed = true;
+            }
+          }
+          if (!u.code) { u = { ...u, code: nextItemCode(u.category, taken) }; changed = true; }
+          return u;
+        });
+        const linked = new Set(next.filter(i => i.catalogId).map(i => i.catalogId));
+        const cats = [...categoryOrder];
+        Object.entries(catalog).sort((a, b) => String(a[1].code || '').localeCompare(String(b[1].code || ''))).forEach(([id, c]) => {
+          if (c.tag !== 'recipe' || linked.has(id) || !c.name) return;
+          const p = catalogPrice(c);
+          const category = c.category || 'อื่นๆ';
+          next.push({ id: nextId++, catalogId: id, code: c.code || nextItemCode(category, taken), costTag: 'recipe', name: c.name, category, unit: c.stockUnit || 'หน่วย', purchaseUnit: c.stockUnit || 'หน่วย', conversionRate: 1, lastPrice: p != null ? round2(p) : 0, priceSource: c.priceMode || 'market', priceSyncedAt: c.priceUpdatedAt || 0, nameSyncedAt: c.nameUpdatedAt || 0, initialStock: 0, initialStockType: 'base', initialStockPrice: 0, currentStock: 0, vendor: '', isActive: true, showWhenInactive: false, createdAt: Date.now() });
+          if (!cats.includes(category)) cats.push(category);
+          changed = true;
+        });
+        if (changed) { setInventory(next); if (cats.length !== categoryOrder.length) setCategoryOrder(cats); }
+      }, [catalog, catalogLoaded, isDataLoaded, isSyncActive, inventory, selectedBranch]);
+
+      const sortInventoryByCode = () => {
+        if (!window.confirm('เรียงลำดับวัตถุดิบตามรหัส (ภายในแต่ละหมวด)?')) return;
+        setInventory([...inventory].sort((a, b) => String(a.code || 'ZZZ').localeCompare(String(b.code || 'ZZZ'))));
+      };
 
       const isItemVisible = (item) => item.isActive !== false || item.showWhenInactive === true;
       const getItemName = (item) => item.isActive === false ? `${item.name} (ไม่ใช้แล้ว)` : item.name;
@@ -669,7 +744,9 @@
       const handleSaveBill = () => {
         const isEditing = !!editReceiptModal; const updatedInventory = [...inventory];
         if (isEditing) { const oldBill = receipts.find(r => r.id === editReceiptModal.id); if (oldBill) { oldBill.items.forEach(oldItem => { const invIdx = updatedInventory.findIndex(i => i.id === oldItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].currentStock -= (oldItem.qty * updatedInventory[invIdx].conversionRate); } }); } }
-        billItems.forEach(bItem => { const invIdx = updatedInventory.findIndex(i => i.id === bItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].lastPrice = bItem.price; updatedInventory[invIdx].vendor = selectedVendor; updatedInventory[invIdx].currentStock += (bItem.qty * updatedInventory[invIdx].conversionRate); updatedInventory[invIdx].lastMoved = getTodayFormatted(); } });
+        billItems.forEach(bItem => { const invIdx = updatedInventory.findIndex(i => i.id === bItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].lastPrice = bItem.price; updatedInventory[invIdx].priceSource = 'bill'; updatedInventory[invIdx].vendor = selectedVendor; updatedInventory[invIdx].currentStock += (bItem.qty * updatedInventory[invIdx].conversionRate); updatedInventory[invIdx].lastMoved = getTodayFormatted(); } });
+        // Share the real purchase price with the cost app (it asks the owner to confirm before using it)
+        billItems.forEach(bItem => { const inv = updatedInventory.find(i => i.id === bItem.item.id); if (inv && inv.catalogId) { const conv = Number(inv.conversionRate) || 1; pushCatalog(inv.catalogId, { billPrice: round2(Number(bItem.price) / conv), billDate: isEditing ? editReceiptModal.date : formatDDMMYYYY(new Date()), billVendor: selectedVendor, billQty: Number(bItem.qty), billPurchaseUnit: inv.purchaseUnit || inv.unit, billUpdatedAt: Date.now() }); } });
         const newBill = { id: isEditing ? editReceiptModal.id : Date.now(), date: isEditing ? editReceiptModal.date : formatDDMMYYYY(new Date()), vendor: selectedVendor, method: paymentMethod, total: billItems.reduce((sum, item) => sum + item.total, 0), items: [...billItems] };
         if (isEditing) { setReceipts(receipts.map(r => r.id === newBill.id ? newBill : r)); setEditReceiptModal(null); alert(`แก้ไขบิลรับของเรียบร้อย`); } 
         else { setReceipts([newBill, ...receipts]); alert(`บันทึกรับของเรียบร้อย`); }
@@ -678,19 +755,36 @@
 
       const openEditReceipt = (bill) => { setEditReceiptModal(bill); setSelectedVendor(bill.vendor); setPaymentMethod(bill.method); setBillItems(bill.items.map(i => ({...i, cartId: Date.now() + Math.random()}))); setReceiptMode('record'); alert("กำลังแก้ไขบิลย้อนหลัง สต๊อกจะถูกปรับปรุงใหม่อัตโนมัติเมื่อกดบันทึก"); };
 
-      const openAddItem = (sourceTab, initialName = '') => { setItemModal({ isOpen: true, mode: 'add', sourceTab: sourceTab, data: { id: null, name: initialName, category: categoryOrder[0] || '', unit: '', purchaseUnit: '', conversionRate: 1, lastPrice: '', initialStock: '', initialStockType: 'base', initialStockPrice: '', vendor: '', isActive: true, showWhenInactive: false, createdAt: Date.now() } }); };
+      const openAddItem = (sourceTab, initialName = '') => { setItemModal({ isOpen: true, mode: 'add', sourceTab: sourceTab, data: { id: null, name: initialName, costTag: '', category: categoryOrder[0] || '', unit: '', purchaseUnit: '', conversionRate: 1, lastPrice: '', initialStock: '', initialStockType: 'base', initialStockPrice: '', vendor: '', isActive: true, showWhenInactive: false, createdAt: Date.now() } }); };
       const openEditItem = (item, sourceTab) => setItemModal({ isOpen: true, mode: 'edit', sourceTab, data: { ...item } });
       
       const saveItemModal = () => {
         const d = itemModal.data; if (!d.name || !d.unit) return alert('กรอกชื่อและหน่วยให้ครบถ้วน');
+        if (selectedBranch === CATALOG_BRANCH && !d.costTag) return alert('กรุณาเลือกประเภท: "ใช้ในสูตรอาหาร" หรือ "อื่นๆ"');
+        const takenCodes = new Set([...inventory.map(i => i.code), ...Object.values(catalog).map(c => c.code)].filter(Boolean));
+        const linkToCatalog = (item) => { const cid = 'STK_' + Date.now(); const cu = costUnitOf(item.unit); const conv = Number(item.conversionRate) || 1; const t0 = Date.now(); pushCatalog(cid, { name: item.name, category: item.category || 'อื่นๆ', code: item.code, tag: 'recipe', stockUnit: item.unit, costUnit: cu.costUnit, factor: cu.factor, priceMode: 'market', marketPrice: round2((Number(item.lastPrice) || 0) / conv), customPrice: null, createdBy: 'stock', createdAt: t0, nameUpdatedAt: t0, nameUpdatedBy: 'stock', priceUpdatedAt: t0, priceUpdatedBy: 'stock' }); return { catalogId: cid, nameSyncedAt: t0, priceSyncedAt: t0, priceSource: 'market' }; };
         let finalCategory = d.category ? String(d.category).trim() : ''; if (finalCategory && !categoryOrder.includes(finalCategory)) setCategoryOrder(prev => [...prev, finalCategory]);
         let finalVendor = d.vendor ? String(d.vendor).trim() : ''; if (finalVendor && !vendors.includes(finalVendor)) setVendors(prev => [...prev, finalVendor]);
         if (itemModal.mode === 'add') {
           const newId = inventory.length > 0 ? Math.max(...inventory.map(i => i.id)) + 1 : 1;
-          const newMat = { ...d, id: newId, category: finalCategory, purchaseUnit: d.purchaseUnit || d.unit, conversionRate: Number(d.conversionRate) || 1, initialStock: d.initialStock === '' ? 0 : Number(d.initialStock), initialStockPrice: d.initialStockPrice === '' ? 0 : Number(d.initialStockPrice), currentStock: d.initialStockType === 'purchase' ? (Number(d.initialStock) * (Number(d.conversionRate) || 1)) : (Number(d.initialStock) || 0), lastPrice: d.lastPrice === '' ? 0 : Number(d.lastPrice), vendor: finalVendor, createdAt: Date.now() };
+          let newMat = { ...d, id: newId, code: nextItemCode(finalCategory, takenCodes), category: finalCategory, purchaseUnit: d.purchaseUnit || d.unit, conversionRate: Number(d.conversionRate) || 1, initialStock: d.initialStock === '' ? 0 : Number(d.initialStock), initialStockPrice: d.initialStockPrice === '' ? 0 : Number(d.initialStockPrice), currentStock: d.initialStockType === 'purchase' ? (Number(d.initialStock) * (Number(d.conversionRate) || 1)) : (Number(d.initialStock) || 0), lastPrice: d.lastPrice === '' ? 0 : Number(d.lastPrice), vendor: finalVendor, createdAt: Date.now() };
+          if (selectedBranch === CATALOG_BRANCH && d.costTag === 'recipe') newMat = { ...newMat, ...linkToCatalog(newMat) };
           setInventory([...inventory, newMat]);
         } else {
-          setInventory(inventory.map(i => i.id === d.id ? { ...i, name: d.name, category: finalCategory, unit: d.unit, purchaseUnit: d.purchaseUnit || d.unit, conversionRate: Number(d.conversionRate) || 1, vendor: finalVendor, isActive: d.isActive !== false, showWhenInactive: d.showWhenInactive === true, lastPrice: d.lastPrice === '' ? 0 : Number(d.lastPrice) } : i));
+          const prev = inventory.find(i => i.id === d.id) || {}; let extra = { costTag: d.costTag || prev.costTag };
+          if (selectedBranch === CATALOG_BRANCH) {
+            const t1 = Date.now();
+            if (prev.catalogId) {
+              const f = {};
+              if (d.name !== prev.name) { f.name = d.name; f.nameUpdatedAt = t1; f.nameUpdatedBy = 'stock'; extra.nameSyncedAt = t1; }
+              if (finalCategory !== prev.category) f.category = finalCategory;
+              if (d.costTag && d.costTag !== prev.costTag) f.tag = d.costTag;
+              if (Object.keys(f).length) pushCatalog(prev.catalogId, f);
+            } else if (d.costTag === 'recipe') {
+              extra = { ...extra, ...linkToCatalog({ ...prev, ...d, category: finalCategory, code: prev.code || nextItemCode(finalCategory, takenCodes) }) };
+            }
+          }
+          setInventory(inventory.map(i => i.id === d.id ? { ...i, ...extra, name: d.name, category: finalCategory, unit: d.unit, purchaseUnit: d.purchaseUnit || d.unit, conversionRate: Number(d.conversionRate) || 1, vendor: finalVendor, isActive: d.isActive !== false, showWhenInactive: d.showWhenInactive === true, lastPrice: d.lastPrice === '' ? 0 : Number(d.lastPrice) } : i));
         }
         setItemModal({ isOpen: false, mode: 'add', sourceTab: 'manage', data: null });
       };
@@ -1727,7 +1821,7 @@
 
                   {manageMode === 'items' && (
                     <div className="space-y-4 animate-in fade-in">
-                      <div className="flex justify-between items-center bg-gray-50 p-2 rounded-lg border border-gray-200"><span className="text-[11px] font-bold text-gray-700">* ลากสลับขึ้น-ลง เพื่อจัดลำดับวัตถุดิบ</span><button onClick={() => openAddItem('manage')} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow hover:bg-blue-700 transition-colors">+ เพิ่มวัตถุดิบ</button></div>
+                      <div className="flex justify-between items-center bg-gray-50 p-2 rounded-lg border border-gray-200"><span className="text-[11px] font-bold text-gray-700">* ลากสลับขึ้น-ลง เพื่อจัดลำดับวัตถุดิบ</span><div className="flex gap-1.5"><button onClick={sortInventoryByCode} className="bg-white text-gray-700 border border-gray-300 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm hover:bg-gray-50 transition-colors">🔤 เรียงตามรหัส</button><button onClick={() => openAddItem('manage')} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow hover:bg-blue-700 transition-colors">+ เพิ่มวัตถุดิบ</button></div></div>
                       {categoryOrder.map(cat => {
                         const catItems = inventory.filter(i => i.category === cat);
                         if (catItems.length === 0) return null;
@@ -1740,7 +1834,7 @@
                                   <div className="flex flex-col shrink-0"><button onClick={() => moveItemUp(item.id)} disabled={index === 0} className="p-1 text-gray-400 hover:text-blue-600 disabled:opacity-20 leading-none">▲</button><button onClick={() => moveItemDown(item.id)} disabled={index === catItems.length - 1} className="p-1 text-gray-400 hover:text-blue-600 disabled:opacity-20 leading-none">▼</button></div>
                                   <div className="flex-1 min-w-0">
                                     <div className="flex justify-between items-center gap-2 mb-1 pr-1">
-                                      <span className={`font-bold text-sm truncate ${item.isActive === false ? 'text-gray-500' : 'text-gray-900'}`}>{getItemName(item)}</span>
+                                      <span className={`font-bold text-sm truncate ${item.isActive === false ? 'text-gray-500' : 'text-gray-900'}`}>{item.code && <span className="mr-1.5 text-[10px] font-black px-1.5 py-0.5 rounded bg-gray-800 text-white align-middle">{item.code}</span>}{getItemName(item)}{item.costTag === 'recipe' && <span className="ml-1.5 text-[9px] font-bold px-1 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 align-middle">🍳 สูตร</span>}{item.priceSource && item.priceSource !== 'bill' && <span className="ml-1 text-[9px] font-bold px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 align-middle">{item.priceSource === 'custom' ? 'ราคาตั้งเอง' : 'ราคาตลาด (ยังไม่มีบิล)'}</span>}</span>
                                       <div className="flex gap-1 shrink-0"><button onClick={() => openEditItem(item, 'manage')} className="text-[10px] bg-blue-50 text-blue-600 px-2 py-1 rounded border border-blue-200 hover:bg-blue-100 font-bold">ตั้งค่า</button><button onClick={() => handleDeleteItem(item.id)} className="text-[10px] bg-red-50 text-red-600 px-2 py-1 rounded border border-red-200 hover:bg-red-100 font-bold">ลบ</button></div>
                                     </div>
                                     <div className="text-[10px] text-gray-500 pl-1 flex items-center gap-2"><span>หมวด: <select value={item.category} onChange={(e) => setInventory(inventory.map(i => i.id === item.id ? { ...i, category: e.target.value } : i))} className="ml-1 bg-transparent border-b outline-none font-bold text-blue-600">{categoryOrder.map(c => <option key={c} value={c}>{c}</option>)}</select></span></div>
@@ -2659,6 +2753,16 @@
                     </div>
                   )}
                   <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-4">
+                    {selectedBranch === CATALOG_BRANCH && (
+                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 space-y-2">
+                        <div className="flex items-center justify-between"><label className="block text-xs font-bold text-blue-900">ประเภทวัตถุดิบ *</label>{itemModal.data.code && <span className="text-[11px] font-black px-2 py-0.5 rounded bg-white border border-blue-300 text-blue-800">รหัส {itemModal.data.code}</span>}</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button type="button" onClick={() => setItemModal({...itemModal, data: {...itemModal.data, costTag: 'recipe'}})} className={`p-2 rounded-lg border-2 text-xs font-bold text-left ${itemModal.data.costTag === 'recipe' ? 'border-blue-600 bg-white text-blue-800' : 'border-gray-200 bg-white text-gray-500'}`}>🍳 ใช้ในสูตรอาหาร<div className="text-[10px] font-normal mt-0.5">วัตถุดิบหลัก/รอง — ส่งชื่อและราคาไปเว็บสเปกวัตถุดิบ</div></button>
+                          <button type="button" onClick={() => setItemModal({...itemModal, data: {...itemModal.data, costTag: 'other'}})} className={`p-2 rounded-lg border-2 text-xs font-bold text-left ${itemModal.data.costTag === 'other' ? 'border-gray-700 bg-white text-gray-800' : 'border-gray-200 bg-white text-gray-500'}`}>📦 อื่นๆ<div className="text-[10px] font-normal mt-0.5">เช่น เครื่องดื่ม ขนม ของใช้ — ใช้ในสต็อกเท่านั้น</div></button>
+                        </div>
+                        {itemModal.data.catalogId && <p className="text-[10px] text-blue-700">🔗 เชื่อมกับเว็บสเปกวัตถุดิบแล้ว — แก้ชื่อที่นี่ อีกเว็บจะเปลี่ยนตาม</p>}
+                      </div>
+                    )}
                     <div><label className="block text-xs font-bold text-gray-700 mb-1">ชื่อวัตถุดิบ *</label><input type="text" value={itemModal.data.name || ''} onChange={(e) => setItemModal({...itemModal, data: {...itemModal.data, name: e.target.value}})} className="w-full p-3 border rounded-xl text-sm font-bold bg-gray-50 focus:bg-white focus:border-blue-500 outline-none transition-all shadow-inner" placeholder="เช่น อกไก่, น้ำปลา" /></div>
                     <div className="grid grid-cols-2 gap-3">
                       <div><label className="block text-xs font-bold text-gray-700 mb-1">หมวดหมู่ *</label><input type="text" list="categories-list" value={itemModal.data.category || ''} onChange={(e) => setItemModal({...itemModal, data: {...itemModal.data, category: e.target.value}})} className="w-full p-3 border rounded-xl text-sm font-bold bg-white focus:border-blue-500 outline-none shadow-sm" placeholder="เลือกหรือพิมพ์ใหม่..." /><datalist id="categories-list">{categoryOrder.map(c => <option key={c} value={c} />)}</datalist></div>
@@ -2670,6 +2774,12 @@
                       <div><label className="block text-xs font-bold text-gray-700 mb-1">อัตราแปลงหน่วย</label><input type="number" value={itemModal.data.conversionRate || ''} onChange={(e) => setItemModal({...itemModal, data: {...itemModal.data, conversionRate: e.target.value}})} className="w-full p-2.5 border rounded-xl text-xs font-bold text-center shadow-sm" placeholder="1" /></div>
                     </div>
                   </div>
+                  {itemModal.mode === 'add' && itemModal.sourceTab !== 'settings' && (
+                    <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                      <label className="block text-xs font-bold text-gray-700 mb-1">ราคาตลาดเริ่มต้น (บาท / หน่วยสั่งซื้อ) — ใช้จนกว่าจะมีบิลซื้อจริง</label>
+                      <input type="number" value={itemModal.data.lastPrice ?? ''} onChange={(e) => setItemModal({...itemModal, data: {...itemModal.data, lastPrice: e.target.value}})} className="w-full p-2.5 border rounded-xl text-sm font-bold shadow-sm" placeholder="เช่น 240" />
+                    </div>
+                  )}
                   {itemModal.sourceTab === 'manage' && itemModal.mode === 'edit' && (
                     <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center">
                       <div><span className="font-bold text-sm text-gray-800">สถานะการใช้งานรายการวัตถุดิบ</span><p className="text-[10px] text-gray-500">ปิดหากเลิกใช้วัตถุดิบนี้ในระบบครัว</p></div>
