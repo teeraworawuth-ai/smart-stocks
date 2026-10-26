@@ -303,10 +303,13 @@
               const boughtQty = pendingBoughtMap[item.id] || 0;
               const avail = openQty + boughtQty;
               const usedQty = Math.max(1, Math.floor(avail * 0.25));
-              const wasteQty = (item.id === 8 && i === 4) ? 1 : 0;
+              let wasteQty = 0; let wasteReason = '';
+              if (item.id === 8 && i === 4) { wasteQty = 1; wasteReason = 'ใบช้ำ/ตัดแต่ง'; }
+              else if (item.id === 1 && i === 8) { wasteQty = 0.5; wasteReason = 'เน่าเสีย/ตู้แช่ไฟตก'; }
+              else if (item.id === 7 && i === 2) { wasteQty = 5; wasteReason = 'แตกเสียหายระหว่างจัดเก็บ'; }
               const closeQty = Math.max(0, avail - usedQty - wasteQty);
               tO += openQty * unitCost; tB += boughtQty * unitCost; tU += usedQty * unitCost; tW += wasteQty * unitCost; tC += closeQty * unitCost;
-              dayDetails.push({ id: item.id, name: item.name, category: item.category, unit: item.unit, costPerUnit: round2(unitCost), open: openQty, bought: boughtQty, used: usedQty, waste: wasteQty, wasteReason: wasteQty > 0 ? 'ใบช้ำ' : '', close: closeQty });
+              dayDetails.push({ id: item.id, name: item.name, category: item.category, unit: item.unit, costPerUnit: round2(unitCost), open: openQty, bought: boughtQty, used: usedQty, waste: wasteQty, wasteReason, close: closeQty });
               item.currentStock = closeQty; item.lastMoved = dStr;
               pendingOpenMap[item.id] = closeQty;
               pendingBoughtMap[item.id] = 0;
@@ -597,6 +600,221 @@
         });
       };
 
+      // ===== ระบบคำนวณไทม์ไลน์สต๊อกและต้นทุนย้อนหลังอัตโนมัติ (Chronological Stock & Cost Recalculation Engine) =====
+      // รองรับ:
+      // 1) ลงสต๊อกย้อนหลังแทรกในวันที่เคยถูกข้าม/ถัวเฉลี่ยไปแล้ว (แบ่งช่วงวันใหม่และคำนวณต้นทุนจริงทั้งวันนั้นและรอบถัดไปอัตโนมัติ)
+      // 2) แก้ไขหรือลบผลเช็คสต๊อกย้อนหลัง
+      // 3) เพิ่ม/แก้ไข/ลบบิลรับของย้อนหลัง
+      // 4) แก้ไขยอดยกมาเริ่มต้น (Initial Stock)
+      const recalculateTimeline = (invList, histList, recList, salesList = dailySalesRecords, options = {}) => {
+        const nextInv = (invList || []).map(i => ({ ...i }));
+        const allHist = (histList || []).map(h => ({ ...h }));
+        const checkedAsc = allHist
+          .filter(h => h.type === 'checked')
+          .sort((a, b) => parseDDMMYYYY(a.endDate || a.date) - parseDDMMYYYY(b.endDate || b.date));
+        const otherHist = allHist.filter(h => h.type !== 'checked');
+
+        // Helper หาต้นทุนต่อหน่วยนับสต๊อก ณ วันที่เช็คสต๊อก (อ้างอิงบิลล่าสุดที่มีวันที่ <= วันสิ้นรอบ)
+        const getHistoricalUnitCost = (item, endObj, fallbackCostPerUnit) => {
+          const conv = Number(item.conversionRate) > 0 ? Number(item.conversionRate) : 1;
+          const validReceipts = (recList || [])
+            .filter(r => parseDDMMYYYY(r.date) <= endObj && (r.items || []).some(ri => ri.item?.id === item.id))
+            .sort((a, b) => {
+              const diff = parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date);
+              return diff !== 0 ? diff : (Number(b.id) || 0) - (Number(a.id) || 0);
+            });
+          if (validReceipts.length > 0) {
+            const ri = validReceipts[0].items.find(x => x.item?.id === item.id);
+            if (ri && Number(ri.price) > 0) return round2(Number(ri.price) / conv);
+          }
+          if (fallbackCostPerUnit !== undefined && Number(fallbackCostPerUnit) > 0 && !options.forceInitialFromSettings) {
+            return round2(Number(fallbackCostPerUnit));
+          }
+          if (Number(item.initialStockPrice) > 0) {
+            return round2(item.initialStockType === 'purchase' ? (Number(item.initialStockPrice) / conv) : Number(item.initialStockPrice));
+          }
+          return round2(getUnitCost(item));
+        };
+
+        const prevCloseMap = {};
+        const prevMovedMap = {};
+
+        const recalculatedChecked = checkedAsc.map((h, k) => {
+          const endDateStr = formatDDMMYYYY(parseDDMMYYYY(h.endDate || h.date));
+          const endObj = parseDDMMYYYY(endDateStr);
+          let startDateStr = endDateStr;
+          let startObj = new Date(endObj);
+
+          if (k === 0) {
+            if (h.startDate && parseDDMMYYYY(h.startDate) <= endObj) {
+              startObj = parseDDMMYYYY(h.startDate);
+              startDateStr = formatDDMMYYYY(startObj);
+            }
+          } else {
+            const prevEndObj = parseDDMMYYYY(checkedAsc[k - 1].endDate || checkedAsc[k - 1].date);
+            startObj = new Date(prevEndObj);
+            startObj.setDate(startObj.getDate() + 1);
+            if (startObj > endObj) startObj = new Date(endObj);
+            startDateStr = formatDDMMYYYY(startObj);
+          }
+
+          const daysDiff = Math.max(1, Math.round((endObj - startObj) / 86400000) + 1);
+
+          // รวมยอดซื้อเข้า (หน่วยนับสต๊อก) จากบิลรับของในช่วงเวลานี้
+          const boughtByItem = {};
+          (recList || []).forEach(r => {
+            const rObj = parseDDMMYYYY(r.date);
+            const inPeriod = k === 0 ? (rObj <= endObj) : (rObj >= startObj && rObj <= endObj);
+            if (inPeriod) {
+              (r.items || []).forEach(ri => {
+                const id = ri.item?.id;
+                if (id == null) return;
+                const invItem = nextInv.find(i => i.id === id);
+                const conv = Number(invItem?.conversionRate || ri.item?.conversionRate) || 1;
+                boughtByItem[id] = round2((boughtByItem[id] || 0) + (Number(ri.qty) || 0) * conv);
+              });
+            }
+          });
+
+          let totalOpeningVal = 0, totalBoughtVal = 0, totalUsedVal = 0, totalWasteVal = 0, totalClosingVal = 0;
+          const newDetails = [];
+
+          nextInv.forEach(item => {
+            const existingDetail = (h.details || []).find(d => d.id === item.id);
+            const conv = Number(item.conversionRate) > 0 ? Number(item.conversionRate) : 1;
+            const initRaw = Number(item.initialStock) || 0;
+            const initBase = round2(item.initialStockType === 'purchase' ? initRaw * conv : initRaw);
+
+            if (!existingDetail && !isItemVisible(item) && initBase === 0 && (prevCloseMap[item.id] || 0) === 0 && (boughtByItem[item.id] || 0) === 0) {
+              return;
+            }
+
+            let openQty = 0;
+            if (k > 0) {
+              openQty = prevCloseMap[item.id] !== undefined ? prevCloseMap[item.id] : initBase;
+            } else {
+              if (options.forceInitialFromSettings || initBase > 0) {
+                openQty = initBase;
+              } else if (existingDetail && existingDetail.open !== undefined) {
+                openQty = Number(existingDetail.open) || 0;
+              } else {
+                openQty = 0;
+              }
+            }
+
+            const boughtQty = round2(boughtByItem[item.id] || 0);
+            const availableQty = round2(openQty + boughtQty);
+            const wasteQty = existingDetail ? (Number(existingDetail.waste) || 0) : 0;
+            const closeQty = existingDetail && existingDetail.close !== undefined
+              ? Number(existingDetail.close)
+              : Math.max(0, round2(availableQty - wasteQty));
+            const usedQty = Math.max(0, round2(availableQty - closeQty - wasteQty));
+            const unitCost = getHistoricalUnitCost(item, endObj, existingDetail?.costPerUnit);
+
+            totalOpeningVal += openQty * unitCost;
+            totalBoughtVal += boughtQty * unitCost;
+            totalUsedVal += usedQty * unitCost;
+            totalWasteVal += wasteQty * unitCost;
+            totalClosingVal += closeQty * unitCost;
+
+            newDetails.push({
+              id: item.id,
+              name: item.name,
+              category: item.category,
+              unit: item.unit,
+              costPerUnit: unitCost,
+              open: openQty,
+              bought: boughtQty,
+              used: usedQty,
+              waste: wasteQty,
+              wasteReason: existingDetail?.wasteReason || '',
+              close: closeQty
+            });
+
+            prevCloseMap[item.id] = closeQty;
+            prevMovedMap[item.id] = endDateStr;
+          });
+
+          // จับคู่ยอดขายในช่วง [startObj, endObj]
+          let periodSales = h.sales;
+          if (salesList && salesList.length > 0) {
+            let sumSales = 0; let covered = 0;
+            salesList.forEach(sr => {
+              const sObj = parseDDMMYYYY(sr.date);
+              if (sObj >= startObj && sObj <= endObj) {
+                sumSales += getRecordDailySalesVal(sr);
+                covered++;
+              }
+            });
+            if (covered > 0) periodSales = sumSales;
+          }
+
+          return {
+            ...h,
+            date: endDateStr,
+            startDate: startDateStr,
+            endDate: endDateStr,
+            days: daysDiff,
+            sales: periodSales,
+            totalOpeningVal: round2(totalOpeningVal),
+            totalBoughtVal: round2(totalBoughtVal),
+            totalUsedVal: round2(totalUsedVal),
+            totalWasteVal: round2(totalWasteVal),
+            totalClosingVal: round2(totalClosingVal),
+            details: newDetails
+          };
+        });
+
+        // คำนวณสต๊อกคงเหลือปัจจุบัน (currentStock) = ยอดปิดของรอบเช็คสต๊อกล่าสุด + บิลรับของที่เกิดหลังวันเช็คสต๊อกล่าสุด
+        if (recalculatedChecked.length > 0) {
+          const lastCheck = recalculatedChecked[recalculatedChecked.length - 1];
+          const lastEndObj = parseDDMMYYYY(lastCheck.endDate || lastCheck.date);
+          const boughtAfterLast = {};
+          const movedAfterLast = {};
+          (recList || []).forEach(r => {
+            const rObj = parseDDMMYYYY(r.date);
+            if (rObj > lastEndObj) {
+              (r.items || []).forEach(ri => {
+                const id = ri.item?.id;
+                if (id == null) return;
+                const invItem = nextInv.find(i => i.id === id);
+                const conv = Number(invItem?.conversionRate || ri.item?.conversionRate) || 1;
+                boughtAfterLast[id] = round2((boughtAfterLast[id] || 0) + (Number(ri.qty) || 0) * conv);
+                movedAfterLast[id] = formatDDMMYYYY(rObj);
+              });
+            }
+          });
+          nextInv.forEach(item => {
+            const conv = Number(item.conversionRate) > 0 ? Number(item.conversionRate) : 1;
+            const initRaw = Number(item.initialStock) || 0;
+            const initBase = round2(item.initialStockType === 'purchase' ? initRaw * conv : initRaw);
+            const baseClose = prevCloseMap[item.id] !== undefined ? prevCloseMap[item.id] : initBase;
+            item.currentStock = Math.max(0, round2(baseClose + (boughtAfterLast[item.id] || 0)));
+            item.lastMoved = movedAfterLast[item.id] || prevMovedMap[item.id] || item.lastMoved;
+          });
+        } else {
+          const allBought = {};
+          (recList || []).forEach(r => {
+            (r.items || []).forEach(ri => {
+              const id = ri.item?.id;
+              if (id == null) return;
+              const invItem = nextInv.find(i => i.id === id);
+              const conv = Number(invItem?.conversionRate || ri.item?.conversionRate) || 1;
+              allBought[id] = round2((allBought[id] || 0) + (Number(ri.qty) || 0) * conv);
+            });
+          });
+          nextInv.forEach(item => {
+            const conv = Number(item.conversionRate) > 0 ? Number(item.conversionRate) : 1;
+            const initRaw = Number(item.initialStock) || 0;
+            const initBase = round2(item.initialStockType === 'purchase' ? initRaw * conv : initRaw);
+            item.currentStock = Math.max(0, round2(initBase + (allBought[item.id] || 0)));
+          });
+        }
+
+        const sortedDesc = [...recalculatedChecked].sort((a, b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date));
+        return { inventory: nextInv, dailyHistory: [...sortedDesc, ...otherHist] };
+      };
+
       // completedRecords: Dynamic sales calculation (fallback to stored h.sales if no daily records found)
       const completedRecords = useMemo(() => {
         return dailyHistory
@@ -743,7 +961,8 @@
         })).sort((a, b) => b.amount - a.amount);
 
         return {
-          id: h.id || i, monthKey, dateLabel: h.days > 1 ? `${h.startDate} ถึง ${h.endDate}` : fallbackDateStr, 
+          id: h.id || i, monthKey, startDate: h.startDate || fallbackDateStr, endDate: h.endDate || fallbackDateStr,
+          dateLabel: h.days > 1 ? `${h.startDate} ถึง ${h.endDate}` : fallbackDateStr, 
           days: h.days || 1, sales: sales, cost: cost, costUsed: h.totalUsedVal, costWaste: h.totalWasteVal,
           dailyExp: dailyExpTotal, expensesList: expensesGroupedList, rawExpenses: expensesInPeriod, overhead: totalOverheadForPeriod,
           overheadList: overheadsForPeriod,
@@ -1043,9 +1262,14 @@
         });
         // Share the real purchase price with the cost app (it asks the owner to confirm before using it)
         if (selectedBranch === CATALOG_BRANCH) normalizedBillItems.forEach(bItem => { const inv = updatedInventory.find(i => i.id === bItem.item.id); if (inv && inv.catalogId) { const conv = Number(inv.conversionRate) || 1; pushCatalog(inv.catalogId, { billPrice: round2(Number(bItem.price) / conv), billDate: billDateFormatted, billVendor: selectedVendor, billQty: Number(bItem.qty), billPurchaseUnit: inv.purchaseUnit || inv.unit, billUpdatedAt: Date.now() }); } });
-        if (isEditing) { setReceipts(nextReceipts); setEditReceiptModal(null); alert(`แก้ไขบิลรับของเรียบร้อย`); } 
-        else { setReceipts(nextReceipts); alert(`บันทึกรับของเรียบร้อย`); }
-        setInventory(updatedInventory); setBillItems([]); setReceiptDate(getTodayFormatted());
+        // คำนวณไทม์ไลน์สต๊อกและต้นทุนใหม่ทั้งหมด (รองรับกรณีลงบิลย้อนหลังในรอบที่เช็คสต๊อกไปแล้วด้วย)
+        const recalc = recalculateTimeline(updatedInventory, dailyHistory, nextReceipts, dailySalesRecords);
+        setReceipts(nextReceipts);
+        setInventory(recalc.inventory);
+        setDailyHistory(recalc.dailyHistory);
+        if (isEditing) { setEditReceiptModal(null); alert('แก้ไขบิลรับของและอัปเดตข้อมูลสต๊อก/ต้นทุนที่เกี่ยวข้องเรียบร้อยแล้ว'); } 
+        else { alert('บันทึกรับของและอัปเดตข้อมูลสต๊อกเรียบร้อยแล้ว'); }
+        setBillItems([]); setReceiptDate(getTodayFormatted());
       };
 
       const openEditReceipt = (bill) => {
@@ -1064,18 +1288,14 @@
       };
 
       const handleDeleteReceipt = (bill) => {
-        if (!window.confirm(`⚠️ ยืนยันการลบบิลรับของวันที่ ${bill.date} ร้าน "${bill.vendor}" ยอดรวม ${formatMoney(bill.total)} บาท?\n(ระบบจะหักยอดสต๊อกที่รับเข้าในบิลนี้ออกอัตโนมัติ)`)) return;
-        const updatedInventory = inventory.map(i => ({ ...i }));
-        (bill.items || []).forEach(bItem => {
-          const invIdx = updatedInventory.findIndex(i => i.id === bItem.item?.id);
-          if (invIdx > -1) {
-            updatedInventory[invIdx].currentStock = Math.max(0, round2(updatedInventory[invIdx].currentStock - (Number(bItem.qty) * (Number(updatedInventory[invIdx].conversionRate) || 1))));
-          }
-        });
-        setInventory(updatedInventory);
-        setReceipts(receipts.filter(r => r.id !== bill.id));
+        if (!window.confirm(`⚠️ ยืนยันการลบบิลรับของวันที่ ${bill.date} ร้าน "${bill.vendor}" ยอดรวม ${formatMoney(bill.total)} บาท?\n(ระบบจะปรับปรุงยอดสต๊อกและคำนวณต้นทุนในรอบที่เกี่ยวข้องให้อัตโนมัติ)`)) return;
+        const nextReceipts = receipts.filter(r => r.id !== bill.id);
+        const recalc = recalculateTimeline(inventory, dailyHistory, nextReceipts, dailySalesRecords);
+        setReceipts(nextReceipts);
+        setInventory(recalc.inventory);
+        setDailyHistory(recalc.dailyHistory);
         if (expandedBillId === bill.id) setExpandedBillId(null);
-        alert('ลบบิลรับของและปรับปรุงยอดสต๊อกเรียบร้อยแล้ว');
+        alert('ลบบิลรับของและคำนวณปรับปรุงยอดสต๊อก/ต้นทุนเรียบร้อยแล้ว');
       };
 
       const openAddItem = (sourceTab, initialName = '') => { setItemModal({ isOpen: true, mode: 'add', sourceTab: sourceTab, data: { id: null, name: initialName, costTag: '', category: categoryOrder[0] || '', unit: '', purchaseUnit: '', conversionRate: 1, lastPrice: '', initialStock: '', initialStockType: 'base', initialStockPrice: '', vendor: '', isActive: true, showWhenInactive: false, createdAt: Date.now() } }); };
@@ -1115,10 +1335,115 @@
               extra = { ...extra, ...linkToCatalog({ ...prev, ...d, category: finalCategory, code: prev.code || nextItemCode(finalCategory, takenCodes) }) };
             }
           }
-          setInventory(inventory.map(i => i.id === d.id ? { ...i, ...extra, name: d.name, category: finalCategory, unit: d.unit, purchaseUnit: d.purchaseUnit || d.unit, conversionRate: Number(d.conversionRate) || 1, vendor: finalVendor, isActive: d.isActive !== false, showWhenInactive: d.showWhenInactive === true, lastPrice: d.lastPrice === '' ? 0 : Number(d.lastPrice) } : i));
+          const nextInvList = inventory.map(i => i.id === d.id ? { ...i, ...extra, name: d.name, category: finalCategory, unit: d.unit, purchaseUnit: d.purchaseUnit || d.unit, conversionRate: Number(d.conversionRate) || 1, initialStock: d.initialStock === '' || d.initialStock === undefined ? i.initialStock : Number(d.initialStock), initialStockType: d.initialStockType || i.initialStockType || 'base', initialStockPrice: d.initialStockPrice === '' || d.initialStockPrice === undefined ? i.initialStockPrice : Number(d.initialStockPrice), vendor: finalVendor, isActive: d.isActive !== false, showWhenInactive: d.showWhenInactive === true, lastPrice: d.lastPrice === '' ? 0 : Number(d.lastPrice) } : i);
+          const recalc = recalculateTimeline(nextInvList, dailyHistory, receipts, dailySalesRecords, { forceInitialFromSettings: itemModal.sourceTab === 'settings' });
+          setInventory(recalc.inventory);
+          setDailyHistory(recalc.dailyHistory);
         }
         setItemModal({ isOpen: false, mode: 'add', sourceTab: 'manage', data: null });
       };
+
+      // คำนวณช่วงวันของรอบเช็คสต๊อกปัจจุบัน (รองรับทั้งวันปัจจุบัน, การแก้ไขวันเดิม, และการลงสต๊อกย้อนหลังแทรกในวันที่เคยข้ามไปแล้ว)
+      const currentCountPeriodInfo = useMemo(() => {
+        const endDateStr = formatDDMMYYYY(parseDDMMYYYY(countDate));
+        const endObj = parseDDMMYYYY(endDateStr);
+        const existingSameDay = dailyHistory.find(h => (h.endDate === endDateStr || h.date === endDateStr) && h.type === 'checked');
+        const prevChecks = dailyHistory
+          .filter(h => h.type === 'checked' && h.endDate !== endDateStr && h.date !== endDateStr && parseDDMMYYYY(h.endDate || h.date) < endObj)
+          .sort((a, b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date));
+        const nextChecks = dailyHistory
+          .filter(h => h.type === 'checked' && h.endDate !== endDateStr && h.date !== endDateStr && parseDDMMYYYY(h.endDate || h.date) > endObj)
+          .sort((a, b) => parseDDMMYYYY(a.endDate || a.date) - parseDDMMYYYY(b.endDate || b.date));
+
+        const prevCheck = prevChecks[0] || null;
+        const nextCheck = nextChecks[0] || null;
+        const isRetroactive = !!nextCheck;
+
+        let startObj = new Date(endObj);
+        let startDateStr = endDateStr;
+        if (prevCheck) {
+          const lastRecordDateObj = parseDDMMYYYY(prevCheck.endDate || prevCheck.date);
+          startObj = new Date(lastRecordDateObj);
+          startObj.setDate(startObj.getDate() + 1);
+          if (startObj > endObj) startObj = new Date(endObj);
+          startDateStr = formatDDMMYYYY(startObj);
+        } else if (existingSameDay && existingSameDay.startDate && parseDDMMYYYY(existingSameDay.startDate) <= endObj) {
+          startDateStr = existingSameDay.startDate;
+          startObj = parseDDMMYYYY(startDateStr);
+        } else if (nextCheck && nextCheck.startDate && parseDDMMYYYY(nextCheck.startDate) <= endObj) {
+          startDateStr = nextCheck.startDate;
+          startObj = parseDDMMYYYY(startDateStr);
+        }
+
+        let daysDiff = Math.round((endObj - startObj) / (1000 * 60 * 60 * 24)) + 1;
+        if (daysDiff < 1) daysDiff = 1;
+
+        const receiptsInRange = receipts.filter(r => {
+          const rDate = parseDDMMYYYY(r.date);
+          return !prevCheck ? (rDate <= endObj) : (rDate >= startObj && rDate <= endObj);
+        });
+        const boughtByItem = {};
+        receiptsInRange.forEach(r => {
+          (r.items || []).forEach(ri => {
+            const id = ri.item?.id;
+            const invItem = inventory.find(i => i.id === id);
+            const conv = Number(invItem?.conversionRate || ri.item?.conversionRate) || 1;
+            if (id != null) boughtByItem[id] = round2((boughtByItem[id] || 0) + (Number(ri.qty) || 0) * conv);
+          });
+        });
+
+        // คำนวณยอดยกมาต้นรอบ (openByItem) และยอดอ้างอิงของรอบถัดไป (nextCloseByItem & boughtInNextSubPeriod)
+        const openByItem = {};
+        const nextCloseByItem = {};
+        const nextWasteByItem = {};
+        const boughtInNextSubPeriod = {};
+
+        if (nextCheck) {
+          const nextEndObj = parseDDMMYYYY(nextCheck.endDate || nextCheck.date);
+          receipts.filter(r => {
+            const rDate = parseDDMMYYYY(r.date);
+            return rDate > endObj && rDate <= nextEndObj;
+          }).forEach(r => {
+            (r.items || []).forEach(ri => {
+              const id = ri.item?.id;
+              const invItem = inventory.find(i => i.id === id);
+              const conv = Number(invItem?.conversionRate || ri.item?.conversionRate) || 1;
+              if (id != null) boughtInNextSubPeriod[id] = round2((boughtInNextSubPeriod[id] || 0) + (Number(ri.qty) || 0) * conv);
+            });
+          });
+        }
+
+        inventory.forEach(item => {
+          const conv = Number(item.conversionRate) > 0 ? Number(item.conversionRate) : 1;
+          const initRaw = Number(item.initialStock) || 0;
+          const initBase = round2(item.initialStockType === 'purchase' ? initRaw * conv : initRaw);
+          if (prevCheck) {
+            const pd = prevCheck.details?.find(d => d.id === item.id);
+            openByItem[item.id] = pd ? Number(pd.close) : initBase;
+          } else if (existingSameDay) {
+            const ed = existingSameDay.details?.find(d => d.id === item.id);
+            openByItem[item.id] = ed ? Number(ed.open) : initBase;
+          } else if (nextCheck) {
+            const nd = nextCheck.details?.find(d => d.id === item.id);
+            openByItem[item.id] = nd ? Number(nd.open) : initBase;
+          } else {
+            openByItem[item.id] = Math.max(0, round2(Number(item.currentStock) - (boughtByItem[item.id] || 0)));
+          }
+          if (nextCheck) {
+            const nd = nextCheck.details?.find(d => d.id === item.id);
+            if (nd) {
+              nextCloseByItem[item.id] = Number(nd.close);
+              nextWasteByItem[item.id] = Number(nd.waste) || 0;
+            }
+          }
+        });
+
+        return {
+          startDateStr, endDateStr, startObj, endObj, daysDiff,
+          existingSameDay, prevCheck, nextCheck, isRetroactive,
+          boughtByItem, openByItem, nextCloseByItem, nextWasteByItem, boughtInNextSubPeriod
+        };
+      }, [countDate, dailyHistory, receipts, inventory]);
 
       const handleDailyCountChange = (id, value) => {
         setDailyCounts(prev => {
@@ -1130,190 +1455,248 @@
           };
         });
       };
+
       const toggleDailyCountChecked = (item) => {
+        const openQty = currentCountPeriodInfo.openByItem[item.id] || 0;
+        const boughtQty = currentCountPeriodInfo.boughtByItem[item.id] || 0;
+        const availableQty = round2(openQty + boughtQty);
         setDailyCounts(prev => {
           const cur = prev[item.id] || {};
-          if (cur.checked && (cur.actual === '' || cur.actual === undefined || Number(cur.actual) === Number(item.currentStock))) {
+          const wasteQty = Number(cur.waste) || 0;
+          const defaultUsableClose = Math.max(0, round2(availableQty - wasteQty));
+          if (cur.checked && (cur.actual === '' || cur.actual === undefined || Number(cur.actual) === defaultUsableClose)) {
             return { ...prev, [item.id]: { ...cur, actual: '', checked: false, checkedOrder: undefined, checkedAt: undefined } };
           }
           const nextOrder = cur.checkedOrder || (Object.values(prev).filter(x => x?.checked).length + 1);
-          const actualVal = (cur.actual !== '' && cur.actual !== undefined) ? cur.actual : String(item.currentStock);
+          const actualVal = (cur.actual !== '' && cur.actual !== undefined) ? cur.actual : String(defaultUsableClose);
           return { ...prev, [item.id]: { ...cur, actual: actualVal, checked: true, checkedOrder: nextOrder, checkedAt: Date.now() } };
         });
       };
+
       const saveWasteModal = () => {
-        const qty = document.getElementById('wasteQty').value;
+        const qty = Number(document.getElementById('wasteQty').value) || 0;
         const reason = document.getElementById('wasteReason').value;
+        const deductCheckbox = document.getElementById('wasteDeductFromActual');
+        const shouldDeductFromActual = deductCheckbox ? deductCheckbox.checked : false;
+        const item = inventory.find(i => i.id === showWasteModal);
+        const openQty = currentCountPeriodInfo.openByItem[showWasteModal] || 0;
+        const boughtQty = currentCountPeriodInfo.boughtByItem[showWasteModal] || 0;
+        const availableQty = round2(openQty + boughtQty);
+
         setDailyCounts(prev => {
           const cur = prev[showWasteModal] || {};
           const nextOrder = cur.checkedOrder || (Object.values(prev).filter(x => x?.checked).length + 1);
-          return { ...prev, [showWasteModal]: { ...cur, waste: Number(qty), reason: reason, photo: '', checked: true, checkedOrder: nextOrder } };
+          let nextActual = cur.actual;
+          if (shouldDeductFromActual && nextActual !== '' && nextActual !== undefined) {
+            nextActual = String(Math.max(0, round2(Number(nextActual) - qty)));
+          } else if (nextActual !== '' && nextActual !== undefined && Number(nextActual) === availableQty && qty > 0) {
+            // หากเดิมกด "เท่ายอดเดิม" ไว้ แล้วมาแจ้งของเสีย ให้ปรับยอดคงเหลือที่ใช้ได้จริงหักของเสียออกอัตโนมัติ
+            nextActual = String(Math.max(0, round2(availableQty - qty)));
+          }
+          return { ...prev, [showWasteModal]: { ...cur, actual: nextActual, waste: qty, reason: reason, photo: '', checked: qty > 0 || !!cur.checked, checkedOrder: nextOrder } };
         });
         setShowWasteModal(null);
       };
 
-      // คำนวณช่วงวันของรอบเช็คสต๊อกปัจจุบัน (สำหรับแสดงยอดยกมา + รับเข้า ในหน้าเช็คสต๊อก)
-      const currentCountPeriodInfo = useMemo(() => {
-        const endDateStr = formatDDMMYYYY(parseDDMMYYYY(countDate));
-        const endObj = parseDDMMYYYY(endDateStr);
-        const existingSameDay = dailyHistory.find(h => (h.endDate === endDateStr || h.date === endDateStr) && h.type === 'checked');
-        const otherChecked = dailyHistory
-          .filter(h => h.type === 'checked' && h.endDate !== endDateStr && h.date !== endDateStr && parseDDMMYYYY(h.endDate || h.date) < endObj)
-          .sort((a, b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date));
-        let startObj = new Date(endObj);
-        let startDateStr = endDateStr;
-        if (existingSameDay && existingSameDay.startDate) {
-          startDateStr = existingSameDay.startDate;
-          startObj = parseDDMMYYYY(startDateStr);
-        } else if (otherChecked.length > 0) {
-          const lastRecordDateObj = parseDDMMYYYY(otherChecked[0].endDate || otherChecked[0].date);
-          startObj = new Date(lastRecordDateObj);
-          startObj.setDate(startObj.getDate() + 1);
-          startDateStr = formatDDMMYYYY(startObj);
-        }
-        let daysDiff = Math.round((endObj - startObj) / (1000 * 60 * 60 * 24)) + 1;
-        if (daysDiff < 1) daysDiff = 1;
-        const receiptsInRange = receipts.filter(r => {
-          const rDate = parseDDMMYYYY(r.date);
-          return rDate >= startObj && rDate <= endObj;
-        });
-        const boughtByItem = {};
-        receiptsInRange.forEach(r => {
-          (r.items || []).forEach(ri => {
-            const id = ri.item?.id;
-            const invItem = inventory.find(i => i.id === id);
-            const conv = Number(invItem?.conversionRate || ri.item?.conversionRate) || 1;
-            if (id != null) boughtByItem[id] = round2((boughtByItem[id] || 0) + (Number(ri.qty) || 0) * conv);
+      // ฟังก์ชันลัด: เปิดหน้าเช็คสต๊อกสำหรับวันที่ต้องการ (รองรับทั้งลงสต๊อกย้อนหลังและแก้ไขของเดิม)
+      const jumpToCountForDate = (targetDateStr) => {
+        const normD = formatDDMMYYYY(parseDDMMYYYY(targetDateStr));
+        const existing = dailyHistory.find(h => (h.endDate === normD || h.date === normD) && h.type === 'checked');
+        if (existing) {
+          const restored = {};
+          let idx = 1;
+          (existing.details || []).forEach(d => {
+            restored[d.id] = { actual: String(d.close), waste: Number(d.waste) || 0, reason: d.wasteReason || '', photo: '', checked: true, checkedOrder: idx++ };
           });
+          setDailyCounts(restored);
+        } else {
+          setDailyCounts({});
+        }
+        setCountDate(toInputDate(normD));
+        setActiveTab('dailyCount');
+      };
+
+      // ฟังก์ชันช่วยเฉลี่ยยอดคงเหลือตามสัดส่วนให้อัตโนมัติ สำหรับรายการที่ไม่ได้นับแยกในโหมดลงสต๊อกย้อนหลัง
+      const fillProportionalRetroactiveCounts = () => {
+        const { nextCheck, startObj, endObj, openByItem, boughtByItem, nextCloseByItem, nextWasteByItem, boughtInNextSubPeriod } = currentCountPeriodInfo;
+        if (!nextCheck) return;
+        const nextEndObj = parseDDMMYYYY(nextCheck.endDate || nextCheck.date);
+        const totalSpanDays = Math.max(1, Math.round((nextEndObj - startObj) / 86400000) + 1);
+        const curSpanDays = Math.max(1, Math.round((endObj - startObj) / 86400000) + 1);
+        const ratio = Math.min(1, Math.max(0, curSpanDays / totalSpanDays));
+
+        setDailyCounts(prev => {
+          const nextState = { ...prev };
+          let orderIdx = Object.values(nextState).filter(x => x?.checked).length + 1;
+          inventory.filter(isItemVisible).forEach(item => {
+            const cur = nextState[item.id];
+            if (cur && cur.actual !== '' && cur.actual !== undefined) return; // ข้ามรายการที่ผู้ใช้กรอกเองแล้ว
+            const openQty = openByItem[item.id] || 0;
+            const bought1 = boughtByItem[item.id] || 0;
+            const bought2 = boughtInNextSubPeriod[item.id] || 0;
+            const avail1 = round2(openQty + bought1);
+            const finalClose = nextCloseByItem[item.id] !== undefined ? nextCloseByItem[item.id] : avail1;
+            const nextWaste = nextWasteByItem[item.id] || 0;
+            const totalUsedInBoth = Math.max(0, round2(openQty + bought1 + bought2 - finalClose - nextWaste));
+            const estUsed1 = round2(totalUsedInBoth * ratio);
+            const minValidClose1 = Math.max(0, round2(finalClose + nextWaste - bought2));
+            const estClose1 = Math.min(avail1, Math.max(minValidClose1, round2(avail1 - estUsed1 - (Number(cur?.waste) || 0))));
+            nextState[item.id] = {
+              ...(cur || { waste: 0, reason: '', photo: '' }),
+              actual: String(estClose1),
+              checked: true,
+              checkedOrder: cur?.checkedOrder || orderIdx++
+            };
+          });
+          return nextState;
         });
-        return { startDateStr, endDateStr, startObj, endObj, daysDiff, existingSameDay, boughtByItem };
-      }, [countDate, dailyHistory, receipts, inventory]);
+      };
 
       const submitDailyCount = () => {
         if (auth.role === 'staff' && !staffNameInput) { alert('กรุณาระบุชื่อผู้ตรวจสอบสต๊อก'); return; }
-        const { startDateStr, endDateStr, startObj, endObj, daysDiff, existingSameDay, boughtByItem } = currentCountPeriodInfo;
+        const { startDateStr, endDateStr, daysDiff, existingSameDay, nextCheck, isRetroactive, boughtByItem, openByItem, nextCloseByItem, nextWasteByItem, boughtInNextSubPeriod } = currentCountPeriodInfo;
 
-        // ตรวจรายการที่กรอกยอดคงเหลือ + ของเสีย มากกว่ายอดที่มีในระบบ (ทำให้ยอดใช้ติดลบ)
+        // 1. ตรวจรายการที่กรอกยอดคงเหลือใช้ได้จริง + ของเสีย มากกว่ายอดที่มีในระบบ
         const overCountItems = [];
+        // 2. กรณีลงสต๊อกย้อนหลัง ตรวจว่ารายการใดกรอกยอดคงเหลือน้อยกว่ายอดคงเหลือปลายงวดของรอบถัดไป (หักรับเข้าเพิ่ม) หรือไม่
+        const conflictNextItems = [];
+
         inventory.forEach(item => {
           if (!isItemVisible(item) && item.currentStock === 0) return;
           const countData = dailyCounts[item.id];
-          if (!countData || (countData.actual === '' || countData.actual === undefined) && !countData.waste) return;
           const receiptsQty = boughtByItem[item.id] || 0;
-          const prevDetail = existingSameDay?.details?.find(d => d.id === item.id);
-          const openQty = prevDetail ? Number(prevDetail.open) : Math.max(0, round2(Number(item.currentStock) - receiptsQty));
+          const openQty = openByItem[item.id] !== undefined ? openByItem[item.id] : Math.max(0, round2(Number(item.currentStock) - receiptsQty));
           const availableQty = round2(openQty + receiptsQty);
-          const actualClose = (countData.actual === '' || countData.actual === undefined) ? availableQty : Number(countData.actual);
-          const wasteQty = Number(countData.waste) || 0;
-          if (actualClose + wasteQty > availableQty + 0.001) {
-            overCountItems.push(`- ${item.name}: มีในระบบ ${availableQty} ${item.unit} แต่นับได้ ${actualClose}${wasteQty > 0 ? ' + เสีย ' + wasteQty : ''} ${item.unit}`);
+          const wasteQty = Number(countData?.waste) || 0;
+          const defaultUsableClose = Math.max(0, round2(availableQty - wasteQty));
+          const actualClose = (!countData || countData.actual === '' || countData.actual === undefined) ? defaultUsableClose : Number(countData.actual);
+
+          if (countData && ((countData.actual !== '' && countData.actual !== undefined) || wasteQty > 0)) {
+            if (actualClose + wasteQty > availableQty + 0.001) {
+              overCountItems.push(`- ${item.name}: มีในระบบ ${availableQty} ${item.unit} แต่นับของดีได้ ${actualClose}${wasteQty > 0 ? ' + เสีย ' + wasteQty : ''} ${item.unit}`);
+            }
+          }
+          if (isRetroactive && nextCloseByItem[item.id] !== undefined) {
+            const bought2 = boughtInNextSubPeriod[item.id] || 0;
+            const close2 = nextCloseByItem[item.id];
+            const waste2 = nextWasteByItem[item.id] || 0;
+            if (actualClose + bought2 + 0.001 < close2 + waste2) {
+              conflictNextItems.push(`- ${item.name}: นับวันที่ ${endDateStr} เหลือ ${actualClose} ${item.unit} (รับเพิ่มรอบถัดไป ${bought2}) ซึ่งน้อยกว่ายอดคงเหลือของรอบถัดไป (${nextCheck.endDate}: เหลือ ${close2}${waste2 > 0 ? ' + เสีย ' + waste2 : ''} ${item.unit})`);
+            }
           }
         });
+
         if (overCountItems.length > 0) {
-          if (!window.confirm(`⚠️ พบรายการที่ยอดนับคงเหลือมากกว่ายอดในระบบ (อาจลืมคีย์บิลรับของ หรือพิมพ์ตัวเลขผิด):\n\n${overCountItems.slice(0, 8).join('\n')}\n\nหากยืนยันส่งยอด ระบบจะปรับยอดใช้ไปของรายการดังกล่าวเป็น 0 และปรับสต๊อกตามที่นับจริง ต้องการดำเนินการต่อหรือไม่?`)) return;
+          if (!window.confirm(`⚠️ พบรายการที่ (ยอดคงเหลือใช้ได้จริง + ของเสีย) มากกว่ายอดที่มีในระบบ:\n\n${overCountItems.slice(0, 8).join('\n')}\n\nหากยืนยันส่งยอด ระบบจะปรับยอดใช้ไปของรายการดังกล่าวเป็น 0 และปรับสต๊อกตามที่นับจริง ต้องการดำเนินการต่อหรือไม่?`)) return;
+        }
+        if (conflictNextItems.length > 0) {
+          if (!window.confirm(`⚠️ คำเตือน (โหมดลงสต๊อกย้อนหลัง): พบรายการที่มียอดคงเหลือน้อยกว่ายอดนับปิดของรอบถัดไป (${nextCheck.endDate}):\n\n${conflictNextItems.slice(0, 8).join('\n')}\n\nต้องการยืนยันบันทึกหรือไม่?`)) return;
         }
 
-        if (existingSameDay) { if(!window.confirm(`⚠️ วันที่ ${endDateStr} มีการบันทึกไปแล้ว ต้องการบันทึกทับหรือไม่?`)) return; } 
-        else { if(!window.confirm(`ยืนยันการส่งยอดสต๊อกประจำวันที่ ${endDateStr}?\n(รอบบิล: ${startDateStr} ถึง ${endDateStr} รวม ${daysDiff} วัน)`)) return; }
-        
-        let totalOpeningVal = 0, totalBoughtVal = 0, totalUsedVal = 0, totalWasteVal = 0, totalClosingVal = 0;
-        const details = []; const updatedInventory = inventory.map(i => ({ ...i }));
+        if (existingSameDay) {
+          if (!window.confirm(`⚠️ วันที่ ${endDateStr} มีการบันทึกสต๊อกไว้แล้ว ยืนยันการบันทึกทับและคำนวณต้นทุนทุกรอบที่เกี่ยวข้องใหม่หรือไม่?`)) return;
+        } else if (isRetroactive) {
+          if (!window.confirm(`⏳ ยืนยันการลงสต๊อกย้อนหลังประจำวันที่ ${endDateStr}?\n\n• รอบนี้จะครอบคลุม: ${startDateStr} ถึง ${endDateStr} (${daysDiff} วัน)\n• ระบบจะแยกคิดต้นทุนจริงของวันที่ ${endDateStr} และปรับปรุงยอดยกมา + คำนวณต้นทุนของรอบถัดไป (${nextCheck.endDate}) ใหม่ให้อัตโนมัติทั้งหมด`)) return;
+        } else {
+          if (!window.confirm(`ยืนยันการส่งยอดสต๊อกประจำวันที่ ${endDateStr}?\n(รอบบิล: ${startDateStr} ถึง ${endDateStr} รวม ${daysDiff} วัน)`)) return;
+        }
 
-        updatedInventory.forEach(item => {
-           if (!isItemVisible(item) && item.currentStock === 0) return;
-           const receiptsQty = boughtByItem[item.id] || 0;
-           const prevDetail = existingSameDay?.details?.find(d => d.id === item.id);
-           // item.currentStock รวมยอดซื้อเข้าจาก handleSaveBill ไปแล้ว ดังนั้นยอดยกมาต้นรอบ = currentStock - receiptsQty
-           const openQty = prevDetail ? Number(prevDetail.open) : Math.max(0, round2(Number(item.currentStock) - receiptsQty));
-           const availableQty = round2(openQty + receiptsQty);
+        const draftDetails = [];
+        inventory.forEach(item => {
+          if (!isItemVisible(item) && item.currentStock === 0) return;
+          const receiptsQty = boughtByItem[item.id] || 0;
+          const openQty = openByItem[item.id] !== undefined ? openByItem[item.id] : Math.max(0, round2(Number(item.currentStock) - receiptsQty));
+          const availableQty = round2(openQty + receiptsQty);
+          const countData = dailyCounts[item.id] || { actual: '', waste: 0, reason: '', photo: '' };
+          const wasteQty = Number(countData.waste) || 0;
+          // สต๊อกคงเหลือ (close) คือสต๊อกของดีที่นำไปปรุงอาหารต่อได้จริงเท่านั้น (ไม่รวมของเสีย)
+          const defaultUsableClose = Math.max(0, round2(availableQty - wasteQty));
+          const actualClose = (countData.actual === '' || countData.actual === undefined) ? defaultUsableClose : Number(countData.actual);
+          const usedQty = Math.max(0, round2(availableQty - actualClose - wasteQty));
+          const unitCost = round2(getUnitCost(item));
 
-           const countData = dailyCounts[item.id] || { actual: availableQty, waste: 0, reason: '', photo: '' };
-           const actualClose = (countData.actual === '' || countData.actual === undefined) ? availableQty : Number(countData.actual); 
-           const wasteQty = Number(countData.waste) || 0;
-           
-           const rawUsedQty = round2(availableQty - actualClose - wasteQty);
-           const usedQty = Math.max(0, rawUsedQty);
-           
-           // คิดต้นทุนต่อหน่วยนับสต๊อก (หาร conversionRate เสมอ)
-           const unitCost = getUnitCost(item);
-           const itemOpenVal = openQty * unitCost;
-           const itemBoughtVal = receiptsQty * unitCost;
-           const itemUsedVal = usedQty * unitCost;
-           const itemWasteVal = wasteQty * unitCost;
-           const itemCloseVal = actualClose * unitCost;
-
-           totalOpeningVal += itemOpenVal; totalBoughtVal += itemBoughtVal; totalUsedVal += itemUsedVal; totalWasteVal += itemWasteVal; totalClosingVal += itemCloseVal;
-           details.push({ id: item.id, name: item.name, category: item.category, unit: item.unit, costPerUnit: round2(unitCost), open: openQty, bought: receiptsQty, used: usedQty, waste: wasteQty, wasteReason: countData.reason, close: actualClose });
-           item.currentStock = actualClose; item.lastMoved = endDateStr;
+          draftDetails.push({
+            id: item.id,
+            name: item.name,
+            category: item.category,
+            unit: item.unit,
+            costPerUnit: unitCost,
+            open: openQty,
+            bought: receiptsQty,
+            used: usedQty,
+            waste: wasteQty,
+            wasteReason: countData.reason || '',
+            close: actualClose
+          });
         });
 
-        let autoSales = null;
-        if (dailySalesRecords.length > 0) {
-          const startMs = parseDDMMYYYY(startDateStr);
-          const endMs = parseDDMMYYYY(endDateStr);
-          let total = 0; let covered = 0;
-          dailySalesRecords.forEach(r => {
-            const rMs = parseDDMMYYYY(r.date);
-            if (rMs >= startMs && rMs <= endMs) {
-              const grabAmt = (r.grab?.after != null && r.grab?.after !== '') ? Number(r.grab.after) : Number(r.grab?.before || 0);
-              const linemanAmt = (r.lineman?.after != null && r.lineman?.after !== '') ? Number(r.lineman.after) : Number(r.lineman?.before || 0);
-              const creditTotal = (r.credits || []).reduce((s, c) => s + Number(c.amount || 0), 0);
-              total += Number(r.cash || 0) + Number(r.transfer || 0) + grabAmt + linemanAmt + creditTotal;
-              covered++;
-            }
-          });
-          if (covered > 0) autoSales = total;
-        }
+        const draftRecord = {
+          id: existingSameDay ? existingSameDay.id : Date.now().toString(),
+          date: endDateStr,
+          startDate: startDateStr,
+          endDate: endDateStr,
+          days: daysDiff,
+          type: 'checked',
+          sales: existingSameDay ? existingSameDay.sales : null,
+          totalOpeningVal: 0,
+          totalBoughtVal: 0,
+          totalUsedVal: 0,
+          totalWasteVal: 0,
+          totalClosingVal: 0,
+          details: draftDetails
+        };
 
-        const newHistoryRecord = { id: Date.now().toString(), date: endDateStr, startDate: startDateStr, endDate: endDateStr, days: daysDiff, type: 'checked', sales: autoSales, totalOpeningVal, totalBoughtVal, totalUsedVal, totalWasteVal, totalClosingVal, details };
-        setDailyHistory(prev => { const filtered = prev.filter(h => h.endDate !== endDateStr && h.date !== endDateStr); return [newHistoryRecord, ...filtered].sort((a,b) => parseDDMMYYYY(b.endDate || b.date) - parseDDMMYYYY(a.endDate || a.date)); });
-        setInventory(updatedInventory);
-        
-        if (autoSales != null) {
-          alert(`ส่งยอดสต๊อกและจับคู่ยอดขายอัตโนมัติ (${formatMoney(autoSales)} บาท) สำเร็จ!\nสามารถดูผลกำไรในหน้าภาพรวมได้ทันที`);
+        const rawNextHistory = [
+          draftRecord,
+          ...dailyHistory.filter(h => (h.endDate || h.date) !== endDateStr)
+        ];
+
+        // คำนวณไทม์ไลน์สต๊อกและต้นทุนใหม่ทั้งหมดตั้งแต่ต้นจนถึงปัจจุบัน
+        const recalc = recalculateTimeline(inventory, rawNextHistory, receipts, dailySalesRecords);
+        setDailyHistory(recalc.dailyHistory);
+        setInventory(recalc.inventory);
+
+        const savedRec = recalc.dailyHistory.find(h => (h.endDate || h.date) === endDateStr);
+        if (isRetroactive) {
+          alert(`✅ บันทึกสต๊อกย้อนหลังวันที่ ${endDateStr} สำเร็จ!\nระบบได้แยกคำนวณต้นทุนจริงของวันที่ ${endDateStr} และปรับปรุงยอดยกมา/ต้นทุนของรอบถัดไป (${nextCheck.endDate}) ใหม่เรียบร้อยแล้ว`);
+        } else if (savedRec && savedRec.sales != null) {
+          alert(`✅ ส่งยอดสต๊อกและจับคู่ยอดขายอัตโนมัติ (${formatMoney(savedRec.sales)} บาท) สำเร็จ!\nสามารถดูผลกำไรในหน้าภาพรวมได้ทันที`);
         } else {
-          alert(`ส่งยอดสต๊อกสำเร็จ!\nรอให้ผู้จัดการบันทึกยอดขายหน้าภาพรวมต่อไป`);
+          alert(`✅ ส่งยอดสต๊อกสำเร็จ!\nเมื่อบันทึกยอดขายรายวันแล้ว ระบบจะคำนวณกำไรในหน้าภาพรวมให้อัตโนมัติ`);
         }
         setDailyCounts({}); setStaffNameInput(''); if(auth.role === 'owner' || auth.role === 'manager') setActiveTab('dashboard');
       };
 
       const savePendingSales = (recordId, autoSalesAmount) => {
-        // ถ้ามียอดอัตโนมัติจาก dailySalesRecords ให้ใช้เลย
         const useAutoSales = autoSalesAmount != null;
         const inputVal = useAutoSales ? autoSalesAmount : pendingSalesInputs[recordId];
         if (!useAutoSales && (inputVal === undefined || inputVal === '')) return alert('กรุณาระบุยอดขาย');
         const confirmMsg = useAutoSales 
-          ? `ยืนยันใช้ยอดขายอัตโนมัติ ${formatMoney(autoSalesAmount)} บาท จากบันทึกยอดขายรายวัน?สามารถแก้ไขได้ในหน้า “ยอดขาย”`
-          : 'ยืนยันบันทึกยอดขายรอบนี้? บันทึกแล้วจะไม่สามารถกลับไปแก้สต๊อกได้อีก';
+          ? `ยืนยันใช้ยอดขายอัตโนมัติ ${formatMoney(autoSalesAmount)} บาท จากบันทึกยอดขายรายวัน?`
+          : 'ยืนยันบันทึกยอดขายรอบนี้?';
         if (!window.confirm(confirmMsg)) return;
         setDailyHistory(prev => prev.map(h => h.id === recordId ? { ...h, sales: Number(inputVal) } : h));
         setPendingSalesInputs(prev => { const newState = {...prev}; delete newState[recordId]; return newState; });
         alert(`บันทึกยอดขาย ${formatMoney(Number(inputVal))} บาท และคำนวณกำไรเสร็จสมบูรณ์`);
       };
 
+      // ดึงผลเช็คสต๊อกรอบใดก็ได้กลับมาแก้ไขที่หน้าเช็คสต๊อก (โดยยังไม่ลบข้อมูลเดิมจนกว่าจะกดบันทึกใหม่)
       const revertPendingSubmission = (recordId) => {
-        if (auth.role !== 'owner') return alert("เฉพาะเจ้าของร้านเท่านั้นที่สามารถยกเลิกและดึงยอดกลับมาแก้ได้");
-        if (!window.confirm("ยืนยันการดึงยอดสต๊อกกลับมาแก้ไข? ระบบจะคืนยอดสต๊อกก่อนนับและพาไปหน้าเช็คสต๊อก")) return;
-        
+        if (auth.role !== 'owner' && auth.role !== 'manager') return alert("เฉพาะเจ้าของร้านหรือผู้จัดการเท่านั้นที่สามารถแก้ไขสต๊อกย้อนหลังได้");
         const targetRecord = dailyHistory.find(h => h.id === recordId); if (!targetRecord) return;
-        const restoredCounts = {};
-        let orderIdx = 1;
-        targetRecord.details.forEach(d => {
-          restoredCounts[d.id] = { actual: d.close, waste: d.waste, reason: d.wasteReason || '', photo: '', checked: true, checkedOrder: orderIdx++ };
-        });
-        // คืนค่า currentStock กลับเป็นยอดก่อนตัดสต๊อกของรอบนั้น (open + bought)
-        const detailMap = {};
-        targetRecord.details.forEach(d => { detailMap[d.id] = d; });
-        setInventory(prev => prev.map(item => {
-          const d = detailMap[item.id];
-          if (!d) return item;
-          return { ...item, currentStock: round2((Number(d.open) || 0) + (Number(d.bought) || 0)) };
-        }));
-        setDailyCounts(restoredCounts);
-        setCountDate(toInputDate(targetRecord.endDate || targetRecord.date));
-        setDailyHistory(prev => prev.filter(h => h.id !== recordId));
-        setActiveTab('dailyCount');
-        alert("ดึงยอดสต๊อกกลับมาที่หน้า 'เช็คสต๊อก' เรียบร้อยแล้ว สามารถแก้ไขตัวเลขและกดบันทึกส่งยอดใหม่ได้เลยครับ");
+        jumpToCountForDate(targetRecord.endDate || targetRecord.date);
+      };
+
+      // ลบผลเช็คสต๊อกรอบที่เลือก (สำหรับกรณีคีย์ผิดวัน และต้องการให้ระบบรวบยอดหรือคืนค่าสต๊อกอัตโนมัติ)
+      const deleteHistoryRecord = (recordId) => {
+        if (auth.role !== 'owner') return alert("เฉพาะเจ้าของร้านเท่านั้นที่สามารถลบประวัติการเช็คสต๊อกได้");
+        const targetRecord = dailyHistory.find(h => h.id === recordId); if (!targetRecord) return;
+        if (!window.confirm(`⚠️ ยืนยันการลบผลเช็คสต๊อกประจำวันที่ ${targetRecord.endDate || targetRecord.date}?\n\nระบบจะคำนวณปรับปรุงยอดสต๊อกและรวมช่วงวันในรอบถัดไป (ถ้ามี) ให้อัตโนมัติ`)) return;
+        const remainingHistory = dailyHistory.filter(h => h.id !== recordId);
+        const recalc = recalculateTimeline(inventory, remainingHistory, receipts, dailySalesRecords);
+        setDailyHistory(recalc.dailyHistory);
+        setInventory(recalc.inventory);
+        alert(`ลบผลเช็คสต๊อกวันที่ ${targetRecord.endDate || targetRecord.date} และคำนวณข้อมูลที่เกี่ยวข้องใหม่เรียบร้อยแล้ว`);
       };
 
       const handleAddExpense = (recordId = null) => {
@@ -1832,7 +2215,7 @@
                 {/* ===== แจ้งเตือนยอดขายรอเช็คสต๊อก & วันที่ยังไม่ได้เช็คสต๊อก ===== */}
                 {(uncheckedSalesInfo.pendingSalesRecs.length > 0 || uncheckedSalesInfo.missingStockDates.length > 0) && (
                   <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-3.5 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                    <div className="space-y-1 flex-1">
+                    <div className="space-y-1.5 flex-1">
                       {uncheckedSalesInfo.pendingSalesRecs.length > 0 && (
                         <div>
                           <div className="font-black text-amber-900 text-xs sm:text-sm flex items-center gap-1.5">
@@ -1845,8 +2228,18 @@
                         </div>
                       )}
                       {uncheckedSalesInfo.missingStockDates.length > 0 && (
-                        <div className="text-[10px] text-amber-700 font-semibold">
-                          📌 วันที่ยังไม่ได้เช็คสต๊อก: <span className="underline">{uncheckedSalesInfo.missingStockDates.join(', ')}</span> (หากเช็คสต๊อกรวบหลายวัน ระบบจะเฉลี่ยต้นทุนถ่วงน้ำหนักตามยอดขายของแต่ละวันให้อัตโนมัติ)
+                        <div className="text-[10px] text-amber-800 font-semibold flex flex-wrap items-center gap-1.5">
+                          <span>📌 กดเลือกวันที่ต้องการเช็คสต๊อกทันที:</span>
+                          {uncheckedSalesInfo.missingStockDates.map(dStr => (
+                            <button
+                              key={dStr}
+                              onClick={() => jumpToCountForDate(dStr)}
+                              className="bg-white hover:bg-amber-100 text-amber-900 border border-amber-400 px-2 py-0.5 rounded-md font-bold shadow-sm transition-colors"
+                            >
+                              📝 เช็ค {dStr}
+                            </button>
+                          ))}
+                          <span className="text-amber-700 font-normal">(หรือเช็ครวบที่วันล่าสุดเพื่อให้ระบบถ่วงน้ำหนักต้นทุนตามยอดขายอัตโนมัติ และสามารถมาลงสต๊อกย้อนหลังแยกวันในภายหลังได้ตลอดเวลา)</span>
                         </div>
                       )}
                     </div>
@@ -2126,31 +2519,67 @@
                                           <span>📊 เฉลี่ยต้นทุนถ่วงน้ำหนักตามยอดขาย ({item.days} วัน)</span>
                                           <span className="text-[9px] text-gray-500 font-normal">สัดส่วนตามขายจริง</span>
                                         </div>
-                                        <table className="w-full text-[10px] border border-gray-200 rounded overflow-hidden">
-                                          <thead className="bg-indigo-50 text-indigo-900 font-bold">
-                                            <tr>
-                                              <th className="p-1 text-left">วันที่</th>
-                                              <th className="p-1 text-right">ยอดขาย</th>
-                                              <th className="p-1 text-right">สัดส่วน</th>
-                                              <th className="p-1 text-right">ทุนถ่วงน้ำหนัก</th>
-                                              <th className="p-1 text-right">GP</th>
-                                            </tr>
-                                          </thead>
-                                          <tbody className="divide-y divide-gray-100 bg-white">
-                                            {item.dailyBreakdown.map((bd, bIdx) => (
-                                              <tr key={bIdx}>
-                                                <td className="p-1 font-bold text-gray-700">{bd.date}</td>
-                                                <td className="p-1 text-right">{bd.closedDay ? <span className="text-gray-400">ร้านปิด</span> : formatMoney(bd.sales)}</td>
-                                                <td className="p-1 text-right text-gray-500">{bd.weightPct}%</td>
-                                                <td className="p-1 text-right text-red-600 font-semibold">{formatMoney(bd.cost)}</td>
-                                                <td className="p-1 text-right text-blue-700 font-bold">{formatMoney(bd.grossProfit)}</td>
+                                          <table className="w-full text-[10px] border border-gray-200 rounded overflow-hidden">
+                                            <thead className="bg-indigo-50 text-indigo-900 font-bold">
+                                              <tr>
+                                                <th className="p-1 text-left">วันที่</th>
+                                                <th className="p-1 text-right">ยอดขาย</th>
+                                                <th className="p-1 text-right">สัดส่วน</th>
+                                                <th className="p-1 text-right">ทุนถ่วงน้ำหนัก</th>
+                                                <th className="p-1 text-right">GP</th>
+                                                <th className="p-1 text-center">จัดการ</th>
                                               </tr>
-                                            ))}
-                                          </tbody>
-                                        </table>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-100 bg-white">
+                                              {item.dailyBreakdown.map((bd, bIdx) => {
+                                                const isSkippedSubDay = bd.date !== item.endDate;
+                                                return (
+                                                  <tr key={bIdx} className="hover:bg-indigo-50/30">
+                                                    <td className="p-1 font-bold text-gray-700">{bd.date}</td>
+                                                    <td className="p-1 text-right">{bd.closedDay ? <span className="text-gray-400">ร้านปิด</span> : formatMoney(bd.sales)}</td>
+                                                    <td className="p-1 text-right text-gray-500">{bd.weightPct}%</td>
+                                                    <td className="p-1 text-right text-red-600 font-semibold">{formatMoney(bd.cost)}</td>
+                                                    <td className="p-1 text-right text-blue-700 font-bold">{formatMoney(bd.grossProfit)}</td>
+                                                    <td className="p-1 text-center">
+                                                      {isSkippedSubDay ? (
+                                                        <button
+                                                          onClick={(e) => { e.stopPropagation(); jumpToCountForDate(bd.date); }}
+                                                          className="text-[9px] bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-bold px-1.5 py-0.5 rounded border border-indigo-300 transition-colors"
+                                                          title="ลงบันทึกสต๊อกย้อนหลังของวันนี้เพื่อแยกคิดต้นทุนจริง"
+                                                        >
+                                                          📝 ลงสต๊อกย้อนหลัง
+                                                        </button>
+                                                      ) : (
+                                                        <span className="text-[8px] text-emerald-700 font-bold bg-emerald-50 px-1 py-0.5 rounded">วันนับปิดรอบ</span>
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                );
+                                              })}
+                                            </tbody>
+                                          </table>
+                                          <p className="text-[9px] text-indigo-700 mt-1">
+                                            💡 หากพบใบเช็คสต๊อกของวันที่ข้ามไปในภายหลัง กดปุ่ม <strong>"📝 ลงสต๊อกย้อนหลัง"</strong> ของวันนั้นได้เลย ระบบจะแยกคิดต้นทุนจริงและอัปเดตรอบถัดไปให้อัตโนมัติ
+                                          </p>
+                                        </div>
+                                      )}
+                                      <div className="mt-3 pt-2 border-t border-gray-100 flex flex-wrap gap-2 justify-end">
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); jumpToCountForDate(item.endDate); }}
+                                          className="text-[10px] bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold px-2.5 py-1 rounded-lg border border-blue-200 transition-colors"
+                                        >
+                                          ✏️ แก้ไขผลเช็คสต๊อกรอบนี้ ({item.endDate})
+                                        </button>
+                                        {auth.role === 'owner' && (
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); deleteHistoryRecord(item.id); }}
+                                            className="text-[10px] bg-red-50 hover:bg-red-100 text-red-600 font-bold px-2.5 py-1 rounded-lg border border-red-200 transition-colors"
+                                          >
+                                            🗑️ ลบผลเช็คสต๊อกรอบนี้
+                                          </button>
+                                        )}
                                       </div>
-                                    )}
-                                  </div>
+                                    </div>
 
                                   <div className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm">
                                     <div className="font-bold border-b-2 border-gray-800 pb-2 mb-2 text-gray-800 text-sm">หักค่าใช้จ่ายดำเนินการ (OPEX)</div>
@@ -2265,8 +2694,8 @@
                                     {!isEditable && <span className="ml-2 text-[9px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded shadow-inner">🔒 เกิน 15 วัน</span>}
                                   </div>
                                   <div className="flex flex-wrap items-center gap-3 bg-gray-50 p-1.5 rounded border border-gray-200">
-                                    <div className="flex items-center gap-1"><span>ปริมาณ:</span><input type="number" disabled={!isEditable} value={item.initialStock === '' ? '' : item.initialStock} onChange={(e) => { const val = e.target.value === '' ? '' : Number(e.target.value); const numVal = val === '' ? 0 : val; const baseQty = item.initialStockType === 'purchase' ? numVal * (Number(item.conversionRate) || 1) : numVal; setInventory(inventory.map(i => i.id === item.id ? {...i, initialStock: val, currentStock: baseQty} : i)); }} className="w-16 p-1 border border-blue-300 rounded text-center font-bold text-sm text-blue-700 focus:border-blue-600 outline-none bg-white disabled:bg-gray-100 disabled:border-gray-200" placeholder="0" /><span className="font-bold text-blue-700">{item.initialStockType === 'base' ? item.unit : (item.purchaseUnit || item.unit)}</span></div>
-                                    <div className="flex items-center gap-1"><span>ราคา/หน่วย:</span><input type="number" disabled={!isEditable} value={item.initialStockPrice === '' || item.initialStockPrice === undefined ? (item.lastPrice || '') : item.initialStockPrice} onChange={(e) => { const pVal = e.target.value === '' ? '' : Number(e.target.value); setInventory(inventory.map(i => i.id === item.id ? {...i, initialStockPrice: pVal, lastPrice: i.lastPrice > 0 ? i.lastPrice : (pVal || 0)} : i)); }} className="w-16 p-1 border border-gray-300 rounded text-center font-bold text-xs text-gray-700 focus:border-blue-500 outline-none bg-white disabled:bg-gray-100" placeholder="0" /><span>บ.</span></div>
+                                    <div className="flex items-center gap-1"><span>ปริมาณ:</span><input type="number" disabled={!isEditable} value={item.initialStock === '' ? '' : item.initialStock} onChange={(e) => { const val = e.target.value === '' ? '' : Number(e.target.value); const nextInv = inventory.map(i => i.id === item.id ? {...i, initialStock: val} : i); const recalc = recalculateTimeline(nextInv, dailyHistory, receipts, dailySalesRecords, { forceInitialFromSettings: true }); setInventory(recalc.inventory); setDailyHistory(recalc.dailyHistory); }} className="w-16 p-1 border border-blue-300 rounded text-center font-bold text-sm text-blue-700 focus:border-blue-600 outline-none bg-white disabled:bg-gray-100 disabled:border-gray-200" placeholder="0" /><span className="font-bold text-blue-700">{item.initialStockType === 'base' ? item.unit : (item.purchaseUnit || item.unit)}</span></div>
+                                    <div className="flex items-center gap-1"><span>ราคา/หน่วย:</span><input type="number" disabled={!isEditable} value={item.initialStockPrice === '' || item.initialStockPrice === undefined ? (item.lastPrice || '') : item.initialStockPrice} onChange={(e) => { const pVal = e.target.value === '' ? '' : Number(e.target.value); const nextInv = inventory.map(i => i.id === item.id ? {...i, initialStockPrice: pVal, lastPrice: i.lastPrice > 0 ? i.lastPrice : (pVal || 0)} : i); const recalc = recalculateTimeline(nextInv, dailyHistory, receipts, dailySalesRecords, { forceInitialFromSettings: true }); setInventory(recalc.inventory); setDailyHistory(recalc.dailyHistory); }} className="w-16 p-1 border border-gray-300 rounded text-center font-bold text-xs text-gray-700 focus:border-blue-500 outline-none bg-white disabled:bg-gray-100" placeholder="0" /><span>บ.</span></div>
                                     <div className="bg-green-50 text-green-800 px-1.5 rounded border border-green-200 font-bold whitespace-nowrap">มูลค่า: {formatMoney((Number(item.initialStock) || 0) * (Number(item.initialStockPrice || item.lastPrice) || 0))} บ.</div>
                                     {isEditable && (<button onClick={() => { if (item.currentStock > 0 && item.currentStock !== item.initialStock) { alert("❌ ไม่สามารถลบได้เนื่องจากวัตถุดิบนี้มีสต๊อกปัจจุบันเคลื่อนไหวแล้ว"); } else { handleDeleteItem(item.id); } }} className="text-[10px] bg-red-50 text-red-600 border border-red-200 px-2 py-1 rounded font-bold hover:bg-red-100 transition-colors ml-auto sm:ml-0">ลบ</button>)}
                                   </div>
@@ -2967,8 +3396,43 @@
                     </div>
                   </div>
 
-                  <p className="text-[9px] text-gray-500 w-full bg-gray-50 p-1.5 rounded border leading-tight">
-                    * พิมพ์ตัวเลขคงเหลือ หรือกดปุ่ม <strong>"✓ เท่ายอดเดิม"</strong> เพื่อทำเครื่องหมายว่า <strong>"✅ เช็คแล้ว"</strong> (ป้องกันการนับซ้ำ) รายการที่เว้นว่างไว้ระบบจะดึงยอดปัจจุบันยกไปอัตโนมัติ
+                  {/* แบนเนอร์แจ้งสถานะโหมดแก้ไขวันเดิม หรือ โหมดลงสต๊อกย้อนหลังแทรกวันข้าม */}
+                  {currentCountPeriodInfo.existingSameDay && (
+                    <div className="w-full bg-blue-50 border border-blue-300 rounded-xl p-2.5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                      <div className="text-[11px] text-blue-900">
+                        <strong>✏️ โหมดแก้ไขสต๊อกวันที่ {currentCountPeriodInfo.endDateStr}</strong> — มีข้อมูลที่เคยบันทึกไว้แล้ว การกดส่งยอดใหม่จะอัปเดตวันนั้นและคำนวณยอดยกมา/ต้นทุนของรอบถัดไปให้อัตโนมัติ
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => jumpToCountForDate(currentCountPeriodInfo.endDateStr)}
+                        className="shrink-0 text-[10px] bg-blue-600 hover:bg-blue-700 text-white font-bold px-2.5 py-1 rounded-lg shadow-sm"
+                      >
+                        📥 ดึงตัวเลขที่เคยบันทึกไว้มาแสดง
+                      </button>
+                    </div>
+                  )}
+
+                  {!currentCountPeriodInfo.existingSameDay && currentCountPeriodInfo.isRetroactive && (
+                    <div className="w-full bg-indigo-50 border-2 border-indigo-300 rounded-xl p-2.5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                      <div className="text-[11px] text-indigo-900 leading-relaxed">
+                        <strong>⏳ โหมดลงสต๊อกย้อนหลังวันที่ {currentCountPeriodInfo.endDateStr}</strong> (แทรกก่อนรอบวันที่ {currentCountPeriodInfo.nextCheck?.endDate})
+                        <div className="text-[10px] text-indigo-700">
+                          เมื่อบันทึกแล้ว ระบบจะแยกคิดต้นทุนจริงของช่วง <strong>{currentCountPeriodInfo.startDateStr} ถึง {currentCountPeriodInfo.endDateStr}</strong> และคำนวณยอดยกมา + ต้นทุนของรอบถัดไป ({currentCountPeriodInfo.nextCheck?.endDate}) ใหม่ให้อัตโนมัติ
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={fillProportionalRetroactiveCounts}
+                        className="shrink-0 text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-2.5 py-1.5 rounded-lg shadow-sm"
+                        title="เฉลี่ยยอดคงเหลือตามสัดส่วนวันจากรอบถัดไป สำหรับรายการที่ไม่ได้นับแยก"
+                      >
+                        🪄 เฉลี่ยตามสัดส่วนสำหรับรายการที่ไม่ได้นับแยก
+                      </button>
+                    </div>
+                  )}
+
+                  <p className="text-[9px] text-gray-600 w-full bg-gray-50 p-1.5 rounded border leading-tight">
+                    * ช่องตัวเลขคือ <strong>"สต๊อกของดีที่เหลือใช้ปรุงอาหารได้จริง (ไม่รวมของเสีย)"</strong> หากมีของเสียให้กด <strong>"+ แจ้งของเสีย"</strong> ระบบจะแยกคิด <strong>ต้นทุนขาย = วัตถุดิบใช้ไป + ของเสีย</strong> ให้อัตโนมัติอย่างชัดเจน
                   </p>
                 </div>
 
@@ -2997,16 +3461,22 @@
                           const countData = dailyCounts[item.id] || { actual: '', waste: 0, reason: '', photo: '' };
                           const checked = isItemCheckedToday(item);
                           const boughtQty = currentCountPeriodInfo.boughtByItem[item.id] || 0;
-                          const prevDetail = currentCountPeriodInfo.existingSameDay?.details?.find(d => d.id === item.id);
-                          const openQty = prevDetail ? Number(prevDetail.open) : Math.max(0, round2(Number(item.currentStock) - boughtQty));
+                          const openQty = currentCountPeriodInfo.openByItem[item.id] !== undefined
+                            ? currentCountPeriodInfo.openByItem[item.id]
+                            : Math.max(0, round2(Number(item.currentStock) - boughtQty));
                           const availableQty = round2(openQty + boughtQty);
-                          const actualNum = (countData.actual === '' || countData.actual === undefined) ? availableQty : Number(countData.actual);
                           const wasteNum = Number(countData.waste) || 0;
+                          const defaultUsableClose = Math.max(0, round2(availableQty - wasteNum));
+                          const actualNum = (countData.actual === '' || countData.actual === undefined) ? defaultUsableClose : Number(countData.actual);
                           const previewUsed = round2(availableQty - actualNum - wasteNum);
                           const isOverCount = checked && previewUsed < -0.001;
+                          const nextCloseRef = currentCountPeriodInfo.nextCloseByItem[item.id];
+                          const nextBoughtRef = currentCountPeriodInfo.boughtInNextSubPeriod[item.id] || 0;
+                          const nextWasteRef = currentCountPeriodInfo.nextWasteByItem[item.id] || 0;
+                          const isConflictNext = currentCountPeriodInfo.isRetroactive && nextCloseRef !== undefined && checked && (actualNum + nextBoughtRef + 0.001 < nextCloseRef + nextWasteRef);
 
                           return (
-                            <div key={item.id} className={`border-2 p-2.5 rounded-xl flex flex-col justify-between shadow-sm w-full transition-all ${isOverCount ? 'bg-red-50/70 border-red-400' : checked ? 'bg-emerald-50/60 border-emerald-400' : 'bg-white border-gray-200 hover:border-blue-300'}`}>
+                            <div key={item.id} className={`border-2 p-2.5 rounded-xl flex flex-col justify-between shadow-sm w-full transition-all ${isOverCount || isConflictNext ? 'bg-red-50/70 border-red-400' : checked ? 'bg-emerald-50/60 border-emerald-400' : 'bg-white border-gray-200 hover:border-blue-300'}`}>
                               <div className="flex justify-between items-start gap-2 mb-1.5">
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1 flex-wrap mb-0.5">
@@ -3027,33 +3497,46 @@
                                       <span>มีในระบบ: <strong className="text-gray-800">{formatNumber(availableQty)} {item.unit}</strong></span>
                                     )}
                                   </p>
-                                  {checked && !isOverCount && (
-                                    <p className="text-[9px] text-blue-700 font-bold mt-0.5">
-                                      ใช้ไป: {formatNumber(Math.max(0, previewUsed))} {item.unit}
+                                  {currentCountPeriodInfo.isRetroactive && nextCloseRef !== undefined && (
+                                    <p className="text-[9px] text-indigo-700 font-semibold mt-0.5">
+                                      📌 ปิดรอบถัดไป ({currentCountPeriodInfo.nextCheck?.endDate}): เหลือ {formatNumber(nextCloseRef)} {item.unit}{nextBoughtRef > 0 ? ` (รับเพิ่ม +${formatNumber(nextBoughtRef)})` : ''}
                                     </p>
+                                  )}
+                                  {checked && !isOverCount && (
+                                    <div className="text-[9px] font-bold mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                      <span className="text-blue-700">ใช้ปรุงอาหาร: {formatNumber(Math.max(0, previewUsed))} {item.unit}</span>
+                                      {wasteNum > 0 && <span className="text-red-600">เสียทิ้ง: {formatNumber(wasteNum)} {item.unit}</span>}
+                                      <span className="text-emerald-800">เหลือของดี: {formatNumber(actualNum)} {item.unit}</span>
+                                    </div>
                                   )}
                                   {isOverCount && (
                                     <p className="text-[9px] text-red-700 font-bold mt-0.5 bg-red-100 px-1.5 py-0.5 rounded border border-red-200">
-                                      ⚠️ เกินระบบอยู่ {formatNumber(Math.abs(previewUsed))} {item.unit} (ลืมคีย์บิลรับของหรือพิมพ์เลขผิด?)
+                                      ⚠️ ของดี ({formatNumber(actualNum)}){wasteNum > 0 ? ` + เสีย (${formatNumber(wasteNum)})` : ''} เกินยอดที่มีในระบบอยู่ {formatNumber(Math.abs(previewUsed))} {item.unit}
+                                    </p>
+                                  )}
+                                  {isConflictNext && (
+                                    <p className="text-[9px] text-red-700 font-bold mt-0.5 bg-red-100 px-1.5 py-0.5 rounded border border-red-200">
+                                      ⚠️ น้อยกว่ายอดคงเหลือของรอบถัดไป ({formatNumber(nextCloseRef)} {item.unit})
                                     </p>
                                   )}
                                 </div>
                                 <div className="flex flex-col items-end gap-1 shrink-0">
+                                  <span className="text-[8px] font-bold text-gray-500 -mb-0.5">เหลือใช้ได้จริง</span>
                                   <input
                                     type="number"
                                     step="any"
-                                    placeholder={availableQty}
+                                    placeholder={defaultUsableClose}
                                     value={countData.actual}
                                     onChange={(e) => handleDailyCountChange(item.id, e.target.value)}
-                                    className={`w-16 p-1.5 border-2 rounded-lg text-center font-black text-sm outline-none shadow-inner ${isOverCount ? 'border-red-500 bg-white text-red-700' : checked ? 'border-emerald-500 bg-white text-emerald-800' : 'border-blue-300 bg-white text-gray-800 focus:border-blue-600'}`}
+                                    className={`w-16 p-1.5 border-2 rounded-lg text-center font-black text-sm outline-none shadow-inner ${isOverCount || isConflictNext ? 'border-red-500 bg-white text-red-700' : checked ? 'border-emerald-500 bg-white text-emerald-800' : 'border-blue-300 bg-white text-gray-800 focus:border-blue-600'}`}
                                   />
                                   <button
                                     type="button"
                                     onClick={() => toggleDailyCountChecked(item)}
                                     className={`text-[9px] font-bold px-2 py-0.5 rounded border transition-colors ${checked ? 'bg-white text-gray-500 border-gray-300 hover:bg-gray-100' : 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'}`}
-                                    title={checked ? 'ยกเลิกสถานะเช็คแล้ว' : 'กดเมื่อนับจริงได้เท่ากับยอดในระบบ'}
+                                    title={checked ? 'ยกเลิกสถานะเช็คแล้ว' : 'กดเมื่อยังไม่ได้ใช้ปรุงอาหาร (หักเฉพาะของเสียถ้ามี)'}
                                   >
-                                    {checked ? '↺ ยกเลิกเช็ค' : '✓ เท่ายอดเดิม'}
+                                    {checked ? '↺ ยกเลิกเช็ค' : (wasteNum > 0 ? '✓ หักเสียแล้ว' : '✓ เท่ายอดเดิม')}
                                   </button>
                                 </div>
                               </div>
@@ -3092,10 +3575,11 @@
             {activeTab === 'history' && auth.role !== 'staff' && (
               <div className="space-y-4 animate-in fade-in">
                 <div className="flex bg-gray-200 rounded-lg p-1 overflow-x-auto hide-scrollbar shadow-sm border border-gray-300">
-                  <button onClick={() => setHistoryMode('daily')} className={`shrink-0 px-4 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'daily' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📊 สรุปยอดนับ</button>
-                  <button onClick={() => setHistoryMode('price')} className={`shrink-0 px-4 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'price' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📈 ประวัติราคา</button>
-                  <button onClick={() => setHistoryMode('stockQty')} className={`shrink-0 px-4 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'stockQty' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📦 จำนวนสต๊อก</button>
-                  <button onClick={() => setHistoryMode('stockValue')} className={`shrink-0 px-4 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'stockValue' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>💰 มูลค่า(FIFO)</button>
+                  <button onClick={() => setHistoryMode('daily')} className={`shrink-0 px-3.5 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'daily' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📊 สรุปยอดนับ</button>
+                  <button onClick={() => setHistoryMode('waste')} className={`shrink-0 px-3.5 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'waste' ? 'bg-white shadow text-red-600' : 'text-gray-500 hover:text-gray-700'}`}>🗑️ วิเคราะห์ของเสีย</button>
+                  <button onClick={() => setHistoryMode('price')} className={`shrink-0 px-3.5 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'price' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📈 ประวัติราคา</button>
+                  <button onClick={() => setHistoryMode('stockQty')} className={`shrink-0 px-3.5 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'stockQty' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>📦 จำนวนสต๊อก</button>
+                  <button onClick={() => setHistoryMode('stockValue')} className={`shrink-0 px-3.5 py-2 text-[11px] sm:text-xs font-bold rounded-md transition-colors ${historyMode === 'stockValue' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}>💰 มูลค่า(FIFO)</button>
                 </div>
 
                 {historyMode === 'daily' && (
@@ -3125,9 +3609,12 @@
                                 <tr>
                                   <td colSpan="5" className="p-0 bg-gray-100/80 border-b-2 border-gray-300 animate-in slide-in-from-top-1">
                                     <div className="p-2 sm:p-3 border-l-4 border-blue-500 overflow-x-auto">
-                                      {auth.role === 'owner' && (
-                                        <div className="mb-3 flex justify-end gap-2">
-                                          <button onClick={() => revertPendingSubmission(day.id)} className="text-[10px] bg-white border border-red-300 text-red-600 px-3 py-1.5 rounded font-bold shadow-sm hover:bg-red-50 transition-colors flex items-center">⚠️ ยกเลิกเพื่อแก้ไขสต๊อกย้อนหลัง</button>
+                                      {(auth.role === 'owner' || auth.role === 'manager') && (
+                                        <div className="mb-3 flex flex-wrap justify-end gap-2">
+                                          <button onClick={() => revertPendingSubmission(day.id)} className="text-[10px] bg-white border border-blue-300 text-blue-700 px-3 py-1.5 rounded font-bold shadow-sm hover:bg-blue-50 transition-colors flex items-center">✏️ แก้ไขสต๊อกรอบนี้ ({day.endDate || day.date})</button>
+                                          {auth.role === 'owner' && (
+                                            <button onClick={() => deleteHistoryRecord(day.id)} className="text-[10px] bg-white border border-red-300 text-red-600 px-3 py-1.5 rounded font-bold shadow-sm hover:bg-red-50 transition-colors flex items-center">🗑️ ลบผลเช็คสต๊อกรอบนี้</button>
+                                          )}
                                         </div>
                                       )}
                                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -3167,6 +3654,159 @@
                   </div>
                 </div>
                 )}
+
+                {historyMode === 'waste' && (() => {
+                  const checkedRecords = dailyHistory.filter(h => h.type === 'checked');
+                  let totalUsedCostAll = 0;
+                  let totalWasteCostAll = 0;
+                  let totalWasteIncidents = 0;
+                  const byItemMap = {};
+                  const byReasonMap = {};
+                  const wasteEvents = [];
+
+                  checkedRecords.forEach(h => {
+                    totalUsedCostAll += Number(h.totalUsedVal) || 0;
+                    totalWasteCostAll += Number(h.totalWasteVal) || 0;
+                    (h.details || []).forEach(d => {
+                      const wQty = Number(d.waste) || 0;
+                      if (wQty > 0) {
+                        const wVal = round2(wQty * (Number(d.costPerUnit) || 0));
+                        const reason = (d.wasteReason || 'ไม่ระบุสาเหตุ').trim() || 'ไม่ระบุสาเหตุ';
+                        totalWasteIncidents++;
+                        if (!byItemMap[d.id]) {
+                          byItemMap[d.id] = { id: d.id, name: d.name, category: d.category, unit: d.unit, totalQty: 0, totalVal: 0, count: 0, reasons: {} };
+                        }
+                        byItemMap[d.id].totalQty = round2(byItemMap[d.id].totalQty + wQty);
+                        byItemMap[d.id].totalVal = round2(byItemMap[d.id].totalVal + wVal);
+                        byItemMap[d.id].count += 1;
+                        byItemMap[d.id].reasons[reason] = (byItemMap[d.id].reasons[reason] || 0) + 1;
+
+                        if (!byReasonMap[reason]) byReasonMap[reason] = { reason, totalVal: 0, count: 0 };
+                        byReasonMap[reason].totalVal = round2(byReasonMap[reason].totalVal + wVal);
+                        byReasonMap[reason].count += 1;
+
+                        wasteEvents.push({
+                          date: h.endDate || h.date,
+                          name: d.name,
+                          category: d.category,
+                          qty: wQty,
+                          unit: d.unit,
+                          costPerUnit: d.costPerUnit,
+                          val: wVal,
+                          reason
+                        });
+                      }
+                    });
+                  });
+
+                  const totalFoodCostAll = totalUsedCostAll + totalWasteCostAll;
+                  const wasteOfFoodCostPct = totalFoodCostAll > 0 ? ((totalWasteCostAll / totalFoodCostAll) * 100).toFixed(1) : '0.0';
+                  const rankedWasteItems = Object.values(byItemMap).sort((a, b) => b.totalVal - a.totalVal);
+                  const rankedReasons = Object.values(byReasonMap).sort((a, b) => b.totalVal - a.totalVal);
+
+                  return (
+                    <div className="space-y-4 animate-in fade-in">
+                      <div className="bg-white p-4 rounded-xl shadow-sm border border-red-200">
+                        <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 mb-3 border-b border-red-100 pb-3">
+                          <div>
+                            <h2 className="font-bold text-red-800 text-base flex items-center gap-2">
+                              <span>🗑️</span>
+                              <span>รายงานวิเคราะห์ต้นทุนของเสีย (Waste Management Report)</span>
+                            </h2>
+                            <p className="text-[11px] text-gray-600 mt-0.5">
+                              แยกต้นทุนวัตถุดิบที่สูญเสียโดยเปล่าประโยชน์ออกจากวัตถุดิบที่ใช้ปรุงอาหารจริง เพื่อใช้วางนโยบายลดการสูญเสีย
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                          <div className="bg-red-50 border border-red-200 rounded-xl p-3">
+                            <div className="text-[10px] font-bold text-red-700">มูลค่าของเสียสะสมทั้งหมด</div>
+                            <div className="text-xl font-black text-red-700 mt-0.5">{formatMoney(totalWasteCostAll)} บาท</div>
+                            <div className="text-[10px] text-red-600 mt-0.5">จากต้นทุนขายรวม {formatMoney(totalFoodCostAll)} บาท</div>
+                          </div>
+                          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                            <div className="text-[10px] font-bold text-amber-800">สัดส่วนของเสียต่อต้นทุนขาย (Waste / Food Cost)</div>
+                            <div className="text-xl font-black text-amber-800 mt-0.5">{wasteOfFoodCostPct}%</div>
+                            <div className="text-[10px] text-amber-700 mt-0.5">{Number(wasteOfFoodCostPct) <= 2 ? '✅ อยู่ในเกณฑ์ดี (ไม่เกิน 2%)' : '⚠️ ควรตรวจสอบเพื่อลดการสูญเสีย'}</div>
+                          </div>
+                          <div className="bg-gray-50 border border-gray-200 rounded-xl p-3">
+                            <div className="text-[10px] font-bold text-gray-600">จำนวนครั้งที่พบของเสีย</div>
+                            <div className="text-xl font-black text-gray-800 mt-0.5">{totalWasteIncidents} ครั้ง ({rankedWasteItems.length} รายการ)</div>
+                            <div className="text-[10px] text-gray-500 mt-0.5">เสียสูงสุด: {rankedWasteItems[0]?.name || '-'}</div>
+                          </div>
+                        </div>
+
+                        {rankedWasteItems.length === 0 ? (
+                          <div className="text-center py-8 text-gray-400 text-xs font-bold bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                            🎉 ยังไม่มีรายการของเสียที่บันทึกในระบบ
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                            {/* ตารางสาเหตุการเสีย */}
+                            <div className="bg-gray-50 p-3 rounded-xl border border-gray-200">
+                              <h3 className="font-bold text-xs text-gray-800 mb-2">📌 แยกตามสาเหตุการสูญเสีย</h3>
+                              <div className="space-y-2">
+                                {rankedReasons.map((r, idx) => {
+                                  const pct = totalWasteCostAll > 0 ? ((r.totalVal / totalWasteCostAll) * 100).toFixed(1) : 0;
+                                  return (
+                                    <div key={idx} className="bg-white p-2 rounded-lg border border-gray-200 shadow-sm">
+                                      <div className="flex justify-between items-center text-xs font-bold text-gray-800">
+                                        <span>{r.reason} <span className="text-[10px] text-gray-400 font-normal">({r.count} ครั้ง)</span></span>
+                                        <span className="text-red-600">{formatMoney(r.totalVal)} ฿ ({pct}%)</span>
+                                      </div>
+                                      <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden mt-1">
+                                        <div className="h-full bg-red-500" style={{ width: `${pct}%` }}></div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* ตารางจัดอันดับวัตถุดิบที่สูญเสียสูงสุด */}
+                            <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 overflow-hidden">
+                              <div className="bg-gray-800 text-white px-3 py-2 text-xs font-bold flex justify-between items-center">
+                                <span>🔥 อันดับวัตถุดิบที่สูญเสียมูลค่าสูงสุด</span>
+                                <span className="text-[10px] text-gray-300 font-normal">เรียงตามมูลค่าที่เสีย (บาท)</span>
+                              </div>
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-[11px] text-left">
+                                  <thead className="bg-gray-100 text-gray-700 font-bold border-b border-gray-200">
+                                    <tr>
+                                      <th className="p-2">อันดับ / วัตถุดิบ</th>
+                                      <th className="p-2 text-center">จำนวนครั้ง</th>
+                                      <th className="p-2 text-right">ปริมาณที่เสียรวม</th>
+                                      <th className="p-2 text-right">มูลค่าที่เสียรวม</th>
+                                      <th className="p-2">สาเหตุหลัก</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-gray-100">
+                                    {rankedWasteItems.map((it, idx) => {
+                                      const topReason = Object.entries(it.reasons).sort((a, b) => b[1] - a[1])[0]?.[0] || '-';
+                                      return (
+                                        <tr key={it.id} className="hover:bg-red-50/30">
+                                          <td className="p-2 font-bold text-gray-800">
+                                            <span className="inline-block w-5 text-center mr-1 text-red-600">#{idx + 1}</span>
+                                            {it.name} <span className="text-[9px] text-gray-400 font-normal">({it.category})</span>
+                                          </td>
+                                          <td className="p-2 text-center font-semibold text-gray-600">{it.count} ครั้ง</td>
+                                          <td className="p-2 text-right font-bold text-gray-800">{formatNumber(it.totalQty)} {it.unit}</td>
+                                          <td className="p-2 text-right font-black text-red-600">{formatMoney(it.totalVal)} ฿</td>
+                                          <td className="p-2 text-[10px] text-gray-600">{topReason}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {historyMode === 'price' && (
                   <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 animate-in fade-in">
@@ -3416,19 +4056,79 @@
           )}
 
           {/* ================= MODALS ================= */}
-          {showWasteModal && (
-            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-gray-900/70 backdrop-blur-sm animate-in fade-in">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
-                <div className="bg-red-600 p-3 flex justify-between items-center"><h3 className="font-bold text-white text-sm">แจ้งของเสีย: {inventory.find(i=>i.id===showWasteModal)?.name}</h3><button onClick={() => setShowWasteModal(null)} className="text-white font-bold">&times;</button></div>
-                <div className="p-4 space-y-4">
-                  <div><label className="block text-xs font-bold text-gray-700 mb-1">ปริมาณที่เสีย <span className="text-red-500">*</span></label><div className="flex items-center"><input type="number" id="wasteQty" defaultValue={dailyCounts[showWasteModal]?.waste || ''} className="w-full p-2 border-2 border-gray-200 rounded-lg font-bold text-red-600 outline-none focus:border-red-500 text-lg text-center shadow-inner" placeholder="0" /><span className="ml-2 text-xs font-bold text-gray-500 w-8">{inventory.find(i=>i.id===showWasteModal)?.unit}</span></div></div>
-                  <div><label className="block text-xs font-bold text-gray-700 mb-1">สาเหตุ (หมายเหตุ)</label><input type="text" id="wasteReason" defaultValue={dailyCounts[showWasteModal]?.reason || ''} className="w-full p-2 border border-gray-300 rounded-lg text-sm outline-none focus:border-red-500 bg-gray-50 shadow-inner" placeholder="เช่น เน่า, ตกพื้น" /></div>
-                  <div><label className="block text-xs font-bold text-gray-700 mb-1 flex items-center">📸 แนบรูปภาพ (ถ้ามี)</label><input type="file" id="wastePhoto" accept="image/*" capture="environment" className="w-full text-[10px] text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-[10px] file:font-bold file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200" /></div>
+          {showWasteModal && (() => {
+            const modalItem = inventory.find(i => i.id === showWasteModal);
+            const openQty = currentCountPeriodInfo.openByItem[showWasteModal] || 0;
+            const boughtQty = currentCountPeriodInfo.boughtByItem[showWasteModal] || 0;
+            const availableQty = round2(openQty + boughtQty);
+            const curCount = dailyCounts[showWasteModal] || {};
+            const hasTypedActual = curCount.actual !== '' && curCount.actual !== undefined;
+            const unitCost = getUnitCost(modalItem);
+
+            return (
+              <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-gray-900/70 backdrop-blur-sm animate-in fade-in">
+                <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+                  <div className="bg-red-600 p-3 flex justify-between items-center">
+                    <h3 className="font-bold text-white text-sm">🗑️ แจ้งของเสีย: {modalItem?.name}</h3>
+                    <button onClick={() => setShowWasteModal(null)} className="text-white font-bold text-lg">&times;</button>
+                  </div>
+                  <div className="p-4 space-y-3.5">
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-2 text-[11px] text-gray-700 flex justify-between items-center">
+                      <span>มีในระบบทั้งหมด (ยกมา + รับเข้า):</span>
+                      <strong className="text-gray-900">{formatNumber(availableQty)} {modalItem?.unit}</strong>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 mb-1">ปริมาณที่เสีย / คัดทิ้ง <span className="text-red-500">*</span></label>
+                      <div className="flex items-center">
+                        <input type="number" step="any" id="wasteQty" defaultValue={curCount.waste || ''} className="w-full p-2 border-2 border-gray-200 rounded-lg font-bold text-red-600 outline-none focus:border-red-500 text-lg text-center shadow-inner" placeholder="0" />
+                        <span className="ml-2 text-xs font-bold text-gray-500 w-10">{modalItem?.unit}</span>
+                      </div>
+                      <p className="text-[10px] text-gray-500 mt-1">
+                        * ต้นทุนต่อหน่วย: {formatNumber(unitCost)} บ./{modalItem?.unit} (ของเสียจะถูกแยกแสดงในงบกำไรขาดทุนเพื่อให้ผู้จัดการตรวจสอบ)
+                      </p>
+                    </div>
+
+                    {hasTypedActual && (
+                      <label className="flex items-start gap-2 bg-amber-50 border border-amber-200 p-2 rounded-lg cursor-pointer text-[11px] text-amber-900">
+                        <input type="checkbox" id="wasteDeductFromActual" className="mt-0.5 rounded" />
+                        <span>
+                          <strong>หักของเสียนี้ออกจากยอดคงเหลือที่กรอกไว้ ({curCount.actual} {modalItem?.unit}) ด้วย</strong>
+                          <span className="block text-[10px] text-amber-700">ติ๊กช่องนี้หากตอนแรกเผลอนับรวมของเสียเข้าไปในช่องคงเหลือ (สต๊อกคงเหลือต้องเป็นของดีที่ใช้ปรุงอาหารได้จริงเท่านั้น)</span>
+                        </span>
+                      </label>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 mb-1">สาเหตุการเสีย (เลือกด่วนหรือพิมพ์ระบุ)</label>
+                      <div className="flex flex-wrap gap-1 mb-1.5">
+                        {['เน่าเสีย/หมดอายุ', 'ใบช้ำ/ตัดแต่ง', 'ทำตก/หก/เสียหาย', 'ปรุงผิด/ลูกค้าคืน'].map(rText => (
+                          <button
+                            key={rText}
+                            type="button"
+                            onClick={() => { const el = document.getElementById('wasteReason'); if (el) el.value = rText; }}
+                            className="text-[10px] bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-2 py-0.5 rounded-full font-semibold transition-colors"
+                          >
+                            {rText}
+                          </button>
+                        ))}
+                      </div>
+                      <input type="text" id="wasteReason" defaultValue={curCount.reason || ''} className="w-full p-2 border border-gray-300 rounded-lg text-sm outline-none focus:border-red-500 bg-gray-50 shadow-inner" placeholder="เช่น เน่าเสีย, ตกพื้น, ไฟตู้แช่ตก" />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 mb-1 flex items-center">📸 แนบรูปภาพ (ถ้ามี)</label>
+                      <input type="file" id="wastePhoto" accept="image/*" capture="environment" className="w-full text-[10px] text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-[10px] file:font-bold file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200" />
+                    </div>
+                  </div>
+                  <div className="p-3 border-t bg-gray-50 flex space-x-2">
+                    <button onClick={() => setShowWasteModal(null)} className="flex-1 py-2.5 bg-gray-200 text-gray-700 font-bold rounded-lg text-sm transition-colors hover:bg-gray-300">ยกเลิก</button>
+                    <button onClick={saveWasteModal} className="flex-1 py-2.5 bg-red-600 text-white font-bold rounded-lg text-sm shadow-sm active:scale-95 transition-all hover:bg-red-700">บันทึกของเสีย</button>
+                  </div>
                 </div>
-                <div className="p-3 border-t bg-gray-50 flex space-x-2"><button onClick={() => setShowWasteModal(null)} className="flex-1 py-2.5 bg-gray-200 text-gray-700 font-bold rounded-lg text-sm transition-colors hover:bg-gray-300">ยกเลิก</button><button onClick={saveWasteModal} className="flex-1 py-2.5 bg-red-600 text-white font-bold rounded-lg text-sm shadow-sm active:scale-95 transition-all hover:bg-red-700">บันทึกของเสีย</button></div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {wasteDetailModal && (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-gray-900/80 backdrop-blur-sm animate-in fade-in" onClick={() => setWasteDetailModal(null)}>
