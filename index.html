@@ -162,7 +162,7 @@
 
       const [auth, setAuth] = useState({ loggedIn: false, role: '', name: '' });
       const [loginPin, setLoginPin] = useState(''); const [activeTab, setActiveTab] = useState('dashboard');
-      const branches = [{ id: 'branch1', name: 'ครัวแสนสุข' }];
+      const branches = [{ id: 'branch1', name: 'ครัวแสนสุข' }, { id: 'demo', name: 'เดโม (ทดลองใช้งาน)' }];
       const [selectedBranch, setSelectedBranch] = useState('branch1');
       
       const [categoryOrder, setCategoryOrder] = useState([]); const [vendors, setVendors] = useState([]); const [expCats, setExpCats] = useState([]);
@@ -251,7 +251,7 @@
       };
 
       useEffect(() => {
-        let unsubscribeSnapshot = null; let unsubscribeCatalog = null; let isMounted = true;
+        let unsubscribeSnapshot = null; let unsubscribeCatalog = null; let isMounted = true; setIsDataLoaded(false); setIsSyncActive(false); lastSavedPayload.current = null; if (selectedBranch !== CATALOG_BRANCH) { setCatalog({}); setCatalogLoaded(false); }
         const initFirebase = async () => {
           try {
             while (!window.FirebaseAPI) { await new Promise(r => setTimeout(r, 100)); }
@@ -746,7 +746,7 @@
         if (isEditing) { const oldBill = receipts.find(r => r.id === editReceiptModal.id); if (oldBill) { oldBill.items.forEach(oldItem => { const invIdx = updatedInventory.findIndex(i => i.id === oldItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].currentStock -= (oldItem.qty * updatedInventory[invIdx].conversionRate); } }); } }
         billItems.forEach(bItem => { const invIdx = updatedInventory.findIndex(i => i.id === bItem.item.id); if (invIdx > -1) { updatedInventory[invIdx].lastPrice = bItem.price; updatedInventory[invIdx].priceSource = 'bill'; updatedInventory[invIdx].vendor = selectedVendor; updatedInventory[invIdx].currentStock += (bItem.qty * updatedInventory[invIdx].conversionRate); updatedInventory[invIdx].lastMoved = getTodayFormatted(); } });
         // Share the real purchase price with the cost app (it asks the owner to confirm before using it)
-        billItems.forEach(bItem => { const inv = updatedInventory.find(i => i.id === bItem.item.id); if (inv && inv.catalogId) { const conv = Number(inv.conversionRate) || 1; pushCatalog(inv.catalogId, { billPrice: round2(Number(bItem.price) / conv), billDate: isEditing ? editReceiptModal.date : formatDDMMYYYY(new Date()), billVendor: selectedVendor, billQty: Number(bItem.qty), billPurchaseUnit: inv.purchaseUnit || inv.unit, billUpdatedAt: Date.now() }); } });
+        if (selectedBranch === CATALOG_BRANCH) billItems.forEach(bItem => { const inv = updatedInventory.find(i => i.id === bItem.item.id); if (inv && inv.catalogId) { const conv = Number(inv.conversionRate) || 1; pushCatalog(inv.catalogId, { billPrice: round2(Number(bItem.price) / conv), billDate: isEditing ? editReceiptModal.date : formatDDMMYYYY(new Date()), billVendor: selectedVendor, billQty: Number(bItem.qty), billPurchaseUnit: inv.purchaseUnit || inv.unit, billUpdatedAt: Date.now() }); } });
         const newBill = { id: isEditing ? editReceiptModal.id : Date.now(), date: isEditing ? editReceiptModal.date : formatDDMMYYYY(new Date()), vendor: selectedVendor, method: paymentMethod, total: billItems.reduce((sum, item) => sum + item.total, 0), items: [...billItems] };
         if (isEditing) { setReceipts(receipts.map(r => r.id === newBill.id ? newBill : r)); setEditReceiptModal(null); alert(`แก้ไขบิลรับของเรียบร้อย`); } 
         else { setReceipts([newBill, ...receipts]); alert(`บันทึกรับของเรียบร้อย`); }
