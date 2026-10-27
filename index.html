@@ -3345,95 +3345,75 @@
               const progressPct = allVisibleItems.length > 0 ? Math.round((checkedCount / allVisibleItems.length) * 100) : 0;
               const q = dailyCountSearch.trim().toLowerCase();
 
-              return (
-              <div className="space-y-4 animate-in fade-in pb-10">
-                <div className="bg-white border border-gray-200 p-3 rounded-xl flex flex-col justify-between items-start gap-2.5 shadow-sm sticky top-[104px] z-20">
-                  <div className="flex flex-wrap items-center justify-between gap-2 w-full">
-                    <div className="flex items-center gap-2">
-                      <div className="bg-red-100 p-2 rounded-lg text-red-600 leading-none shadow-sm">📝</div>
-                      <div>
-                        <h2 className="font-bold text-gray-800 text-sm flex items-center gap-2">
-                          <span>นับสต๊อกสิ้นวัน</span>
-                          {currentCountPeriodInfo.daysDiff > 1 && (
-                            <span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-bold">
-                              รวบยอด {currentCountPeriodInfo.daysDiff} วัน ({currentCountPeriodInfo.startDateStr} ถึง {currentCountPeriodInfo.endDateStr})
-                            </span>
-                          )}
-                        </h2>
-                        <div className="flex items-center mt-1"><span className="text-[10px] text-gray-500 mr-2 font-bold">วันที่นับ:</span><input type="date" value={toInputDate(countDate)} onChange={(e) => setCountDate(e.target.value)} className="text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1.5 py-0.5 outline-none w-full max-w-[130px] shadow-sm"/></div>
-                      </div>
-                    </div>
-                    {/* Progress Badge */}
-                    <div className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-right min-w-[150px]">
-                      <div className="flex justify-between items-center text-[10px] font-bold gap-2">
-                        <span className="text-gray-600">ความคืบหน้าวันนี้</span>
-                        <span className="text-emerald-700 font-black">{checkedCount} / {allVisibleItems.length} รายการ</span>
-                      </div>
-                      <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden mt-1">
-                        <div className="h-full bg-emerald-500 transition-all duration-300" style={{ width: `${progressPct}%` }}></div>
-                      </div>
-                    </div>
-                  </div>
+              const filterBtn = (key, label, count, activeCls) => (
+                <button onClick={() => setDailyCountFilter(key)} className={`px-1.5 sm:px-2 py-1 rounded-md whitespace-nowrap transition-colors ${dailyCountFilter === key ? 'bg-white shadow ' + activeCls : 'text-gray-500'}`}>{label} {count}</button>
+              );
 
-                  {/* ช่องค้นหาวัตถุดิบด่วน + ตัวกรองสถานะการเช็ค */}
-                  <div className="w-full flex flex-col sm:flex-row gap-2">
-                    <div className="relative flex-1">
-                      <input
-                        type="text"
-                        placeholder="🔍 ค้นหาชื่อหรือรหัสวัตถุดิบ (เช่น กุ้ง, S001) เพื่อกรอกยอดทันที..."
-                        value={dailyCountSearch}
-                        onChange={(e) => setDailyCountSearch(e.target.value)}
-                        className="w-full pl-8 pr-8 py-2 bg-blue-50/40 border border-blue-200 rounded-xl text-xs font-bold text-gray-800 outline-none focus:border-blue-500 focus:bg-white shadow-inner"
-                      />
-                      {dailyCountSearch && (
-                        <button onClick={() => setDailyCountSearch('')} className="absolute right-2.5 top-2 text-gray-400 hover:text-gray-600 font-bold text-xs">✕</button>
+              return (
+              <div className="space-y-2 animate-in fade-in pb-6">
+                {/* ===== กล่องหัวตรึงหน้า: วันที่ + ปุ่มส่งยอด + ค้นหา + ตัวกรอง (กระชับสำหรับมือถือ) ===== */}
+                <div className="bg-white border border-gray-200 p-2 rounded-xl shadow-sm sticky top-[104px] z-20 space-y-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1">
+                        <h2 className="font-bold text-gray-800 text-[13px] whitespace-nowrap">📝 นับสต๊อก</h2>
+                        <button
+                          type="button"
+                          onClick={() => alert('วิธีนับสต๊อก\n\n• ช่องตัวเลข = สต๊อก "ของดี" ที่เหลือใช้ปรุงอาหารได้จริง (ไม่รวมของเสีย)\n• มีของเสีย กดปุ่ม 🗑️ เพื่อแจ้ง ระบบจะแยกคิด ต้นทุนขาย = ใช้ไป + ของเสีย\n• "✓ เท่าเดิม" = นับได้เท่ายอดในระบบ (ไม่ต้องพิมพ์)\n• รายการที่ไม่ได้เช็ค ระบบจะยกยอดในระบบไปให้อัตโนมัติ')}
+                          className="w-4 h-4 rounded-full bg-gray-100 text-gray-500 text-[9px] font-bold leading-none shrink-0"
+                          title="วิธีนับสต๊อก"
+                        >i</button>
+                        <input type="date" value={toInputDate(countDate)} onChange={(e) => setCountDate(e.target.value)} className="text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1 py-0.5 outline-none min-w-0 w-[118px]" />
+                      </div>
+                      {currentCountPeriodInfo.daysDiff > 1 && (
+                        <div className="text-[9px] text-orange-700 font-bold truncate mt-0.5">รวบยอด {currentCountPeriodInfo.daysDiff} วัน ({currentCountPeriodInfo.startDateStr} – {currentCountPeriodInfo.endDateStr})</div>
                       )}
                     </div>
-                    <div className="flex bg-gray-100 p-1 rounded-xl shrink-0 border border-gray-200 text-[11px] font-bold">
-                      <button onClick={() => setDailyCountFilter('all')} className={`px-2.5 py-1 rounded-lg transition-colors ${dailyCountFilter === 'all' ? 'bg-white shadow text-gray-800' : 'text-gray-500'}`}>ทั้งหมด ({allVisibleItems.length})</button>
-                      <button onClick={() => setDailyCountFilter('unchecked')} className={`px-2.5 py-1 rounded-lg transition-colors ${dailyCountFilter === 'unchecked' ? 'bg-white shadow text-amber-700' : 'text-gray-500'}`}>⏳ ยังไม่เช็ค ({uncheckedCount})</button>
-                      <button onClick={() => setDailyCountFilter('checked')} className={`px-2.5 py-1 rounded-lg transition-colors ${dailyCountFilter === 'checked' ? 'bg-white shadow text-emerald-700' : 'text-gray-500'}`}>✅ เช็คแล้ว ({checkedCount})</button>
+                    <button
+                      onClick={submitDailyCount}
+                      className="shrink-0 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold rounded-lg shadow-sm px-2.5 py-1.5 text-[11px] leading-tight text-center transition-all"
+                    >
+                      ✅ ส่งยอด
+                      <span className="block text-[9px] font-semibold opacity-90">{checkedCount}/{allVisibleItems.length} รายการ</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <div className="relative flex-1 min-w-0">
+                      <input
+                        type="text"
+                        placeholder="🔍 ค้นหาชื่อ/รหัส"
+                        value={dailyCountSearch}
+                        onChange={(e) => setDailyCountSearch(e.target.value)}
+                        className="w-full pl-2 pr-6 py-1.5 bg-blue-50/40 border border-blue-200 rounded-lg text-[11px] font-bold text-gray-800 outline-none focus:border-blue-500 focus:bg-white"
+                      />
+                      {dailyCountSearch && (
+                        <button onClick={() => setDailyCountSearch('')} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 font-bold text-xs">✕</button>
+                      )}
+                    </div>
+                    <div className="flex bg-gray-100 p-0.5 rounded-lg shrink-0 border border-gray-200 text-[10px] font-bold">
+                      {filterBtn('all', 'ทั้งหมด', allVisibleItems.length, 'text-gray-800')}
+                      {filterBtn('unchecked', '⏳', uncheckedCount, 'text-amber-700')}
+                      {filterBtn('checked', '✅', checkedCount, 'text-emerald-700')}
                     </div>
                   </div>
 
-                  {/* แบนเนอร์แจ้งสถานะโหมดแก้ไขวันเดิม หรือ โหมดลงสต๊อกย้อนหลังแทรกวันข้าม */}
+                  {auth.role === 'staff' && (
+                    <input type="text" value={staffNameInput} onChange={(e) => setStaffNameInput(e.target.value)} maxLength="30" placeholder="✍️ ลงชื่อผู้ตรวจสอบ (จำเป็น)" className={`w-full px-2 py-1.5 text-[11px] border rounded-lg outline-none focus:border-blue-500 ${staffNameInput ? 'border-gray-300' : 'border-red-300 bg-red-50/40'}`} />
+                  )}
+
                   {currentCountPeriodInfo.existingSameDay && (
-                    <div className="w-full bg-blue-50 border border-blue-300 rounded-xl p-2.5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <div className="text-[11px] text-blue-900">
-                        <strong>✏️ โหมดแก้ไขสต๊อกวันที่ {currentCountPeriodInfo.endDateStr}</strong> — มีข้อมูลที่เคยบันทึกไว้แล้ว การกดส่งยอดใหม่จะอัปเดตวันนั้นและคำนวณยอดยกมา/ต้นทุนของรอบถัดไปให้อัตโนมัติ
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => jumpToCountForDate(currentCountPeriodInfo.endDateStr)}
-                        className="shrink-0 text-[10px] bg-blue-600 hover:bg-blue-700 text-white font-bold px-2.5 py-1 rounded-lg shadow-sm"
-                      >
-                        📥 ดึงตัวเลขที่เคยบันทึกไว้มาแสดง
-                      </button>
+                    <div className="flex items-center gap-1.5 bg-blue-50 border border-blue-300 rounded-lg px-2 py-1">
+                      <span className="flex-1 min-w-0 text-[10px] text-blue-900 font-semibold truncate">✏️ แก้ไขวันที่ {currentCountPeriodInfo.endDateStr} (บันทึกแล้ว — ส่งใหม่จะคำนวณรอบถัดไปให้)</span>
+                      <button type="button" onClick={() => jumpToCountForDate(currentCountPeriodInfo.endDateStr)} className="shrink-0 text-[9px] bg-blue-600 text-white font-bold px-1.5 py-0.5 rounded">📥 ดึงค่าเดิม</button>
                     </div>
                   )}
-
                   {!currentCountPeriodInfo.existingSameDay && currentCountPeriodInfo.isRetroactive && (
-                    <div className="w-full bg-indigo-50 border-2 border-indigo-300 rounded-xl p-2.5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <div className="text-[11px] text-indigo-900 leading-relaxed">
-                        <strong>⏳ โหมดลงสต๊อกย้อนหลังวันที่ {currentCountPeriodInfo.endDateStr}</strong> (แทรกก่อนรอบวันที่ {currentCountPeriodInfo.nextCheck?.endDate})
-                        <div className="text-[10px] text-indigo-700">
-                          เมื่อบันทึกแล้ว ระบบจะแยกคิดต้นทุนจริงของช่วง <strong>{currentCountPeriodInfo.startDateStr} ถึง {currentCountPeriodInfo.endDateStr}</strong> และคำนวณยอดยกมา + ต้นทุนของรอบถัดไป ({currentCountPeriodInfo.nextCheck?.endDate}) ใหม่ให้อัตโนมัติ
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={fillProportionalRetroactiveCounts}
-                        className="shrink-0 text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-2.5 py-1.5 rounded-lg shadow-sm"
-                        title="เฉลี่ยยอดคงเหลือตามสัดส่วนวันจากรอบถัดไป สำหรับรายการที่ไม่ได้นับแยก"
-                      >
-                        🪄 เฉลี่ยตามสัดส่วนสำหรับรายการที่ไม่ได้นับแยก
-                      </button>
+                    <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-300 rounded-lg px-2 py-1">
+                      <span className="flex-1 min-w-0 text-[10px] text-indigo-900 font-semibold truncate" title={`แยกคิดต้นทุน ${currentCountPeriodInfo.startDateStr} ถึง ${currentCountPeriodInfo.endDateStr} และคำนวณรอบ ${currentCountPeriodInfo.nextCheck?.endDate} ใหม่อัตโนมัติ`}>⏳ ลงย้อนหลัง {currentCountPeriodInfo.endDateStr} (ก่อนรอบ {currentCountPeriodInfo.nextCheck?.endDate})</span>
+                      <button type="button" onClick={fillProportionalRetroactiveCounts} className="shrink-0 text-[9px] bg-indigo-600 text-white font-bold px-1.5 py-0.5 rounded" title="เฉลี่ยยอดคงเหลือตามสัดส่วนวัน สำหรับรายการที่ไม่ได้นับแยก">🪄 เฉลี่ยที่เหลือ</button>
                     </div>
                   )}
-
-                  <p className="text-[9px] text-gray-600 w-full bg-gray-50 p-1.5 rounded border leading-tight">
-                    * ช่องตัวเลขคือ <strong>"สต๊อกของดีที่เหลือใช้ปรุงอาหารได้จริง (ไม่รวมของเสีย)"</strong> หากมีของเสียให้กด <strong>"+ แจ้งของเสีย"</strong> ระบบจะแยกคิด <strong>ต้นทุนขาย = วัตถุดิบใช้ไป + ของเสีย</strong> ให้อัตโนมัติอย่างชัดเจน
-                  </p>
                 </div>
 
                 {categoryOrder.map(category => {
@@ -3448,15 +3428,15 @@
                   if (itemsInCategory.length === 0) return null;
                   const catAll = allVisibleItems.filter(i => i.category === category);
                   const catChecked = catAll.filter(isItemCheckedToday).length;
-                  
+
                   return (
-                    <div key={category} className="mb-4">
-                      <div className="flex justify-between items-center border-b border-gray-300 pb-1 mb-2 px-1">
-                        <h3 className="font-bold text-gray-700 text-[13px] flex items-center"><span className="w-1.5 h-3.5 bg-gray-500 mr-2 rounded-full shadow-sm"></span>{category}</h3>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${catChecked === catAll.length ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-200 text-gray-700'}`}>เช็คแล้ว {catChecked}/{catAll.length}</span>
+                    <div key={category}>
+                      <div className="flex justify-between items-center border-b border-gray-300 pb-0.5 mb-1 px-0.5">
+                        <h3 className="font-bold text-gray-700 text-[12px] flex items-center"><span className="w-1 h-3 bg-gray-500 mr-1.5 rounded-full"></span>{category}</h3>
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${catChecked === catAll.length ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-200 text-gray-700'}`}>{catChecked}/{catAll.length}</span>
                       </div>
-                      
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 px-1 w-full overflow-hidden transition-all">
+
+                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-1.5 w-full">
                         {itemsInCategory.map((item) => {
                           const countData = dailyCounts[item.id] || { actual: '', waste: 0, reason: '', photo: '' };
                           const checked = isItemCheckedToday(item);
@@ -3474,82 +3454,60 @@
                           const nextBoughtRef = currentCountPeriodInfo.boughtInNextSubPeriod[item.id] || 0;
                           const nextWasteRef = currentCountPeriodInfo.nextWasteByItem[item.id] || 0;
                           const isConflictNext = currentCountPeriodInfo.isRetroactive && nextCloseRef !== undefined && checked && (actualNum + nextBoughtRef + 0.001 < nextCloseRef + nextWasteRef);
+                          const isWarn = isOverCount || isConflictNext;
 
                           return (
-                            <div key={item.id} className={`border-2 p-2.5 rounded-xl flex flex-col justify-between shadow-sm w-full transition-all ${isOverCount || isConflictNext ? 'bg-red-50/70 border-red-400' : checked ? 'bg-emerald-50/60 border-emerald-400' : 'bg-white border-gray-200 hover:border-blue-300'}`}>
-                              <div className="flex justify-between items-start gap-2 mb-1.5">
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-1 flex-wrap mb-0.5">
-                                    {item.code && <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-gray-800 text-white shrink-0">{item.code}</span>}
-                                    {checked ? (
-                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-emerald-600 text-white shrink-0">
-                                        ✅ เช็คแล้ว{countData.checkedOrder ? ` #${countData.checkedOrder}` : ''}
-                                      </span>
-                                    ) : (
-                                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 shrink-0">ยังไม่เช็ค</span>
-                                    )}
-                                  </div>
-                                  <h4 className="font-bold text-gray-800 text-[12px] truncate leading-tight" title={item.name}>{getItemName(item)}</h4>
-                                  <p className="text-[10px] text-gray-600 mt-0.5 font-medium">
-                                    {boughtQty > 0 ? (
-                                      <span>ยกมา {formatNumber(openQty)} <span className="text-green-700 font-bold">+ รับเข้า {formatNumber(boughtQty)}</span> = <strong>มี {formatNumber(availableQty)} {item.unit}</strong></span>
-                                    ) : (
-                                      <span>มีในระบบ: <strong className="text-gray-800">{formatNumber(availableQty)} {item.unit}</strong></span>
-                                    )}
-                                  </p>
-                                  {currentCountPeriodInfo.isRetroactive && nextCloseRef !== undefined && (
-                                    <p className="text-[9px] text-indigo-700 font-semibold mt-0.5">
-                                      📌 ปิดรอบถัดไป ({currentCountPeriodInfo.nextCheck?.endDate}): เหลือ {formatNumber(nextCloseRef)} {item.unit}{nextBoughtRef > 0 ? ` (รับเพิ่ม +${formatNumber(nextBoughtRef)})` : ''}
-                                    </p>
-                                  )}
-                                  {checked && !isOverCount && (
-                                    <div className="text-[9px] font-bold mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                                      <span className="text-blue-700">ใช้ปรุงอาหาร: {formatNumber(Math.max(0, previewUsed))} {item.unit}</span>
-                                      {wasteNum > 0 && <span className="text-red-600">เสียทิ้ง: {formatNumber(wasteNum)} {item.unit}</span>}
-                                      <span className="text-emerald-800">เหลือของดี: {formatNumber(actualNum)} {item.unit}</span>
-                                    </div>
-                                  )}
-                                  {isOverCount && (
-                                    <p className="text-[9px] text-red-700 font-bold mt-0.5 bg-red-100 px-1.5 py-0.5 rounded border border-red-200">
-                                      ⚠️ ของดี ({formatNumber(actualNum)}){wasteNum > 0 ? ` + เสีย (${formatNumber(wasteNum)})` : ''} เกินยอดที่มีในระบบอยู่ {formatNumber(Math.abs(previewUsed))} {item.unit}
-                                    </p>
-                                  )}
-                                  {isConflictNext && (
-                                    <p className="text-[9px] text-red-700 font-bold mt-0.5 bg-red-100 px-1.5 py-0.5 rounded border border-red-200">
-                                      ⚠️ น้อยกว่ายอดคงเหลือของรอบถัดไป ({formatNumber(nextCloseRef)} {item.unit})
-                                    </p>
-                                  )}
-                                </div>
-                                <div className="flex flex-col items-end gap-1 shrink-0">
-                                  <span className="text-[8px] font-bold text-gray-500 -mb-0.5">เหลือใช้ได้จริง</span>
-                                  <input
-                                    type="number"
-                                    step="any"
-                                    placeholder={defaultUsableClose}
-                                    value={countData.actual}
-                                    onChange={(e) => handleDailyCountChange(item.id, e.target.value)}
-                                    className={`w-16 p-1.5 border-2 rounded-lg text-center font-black text-sm outline-none shadow-inner ${isOverCount || isConflictNext ? 'border-red-500 bg-white text-red-700' : checked ? 'border-emerald-500 bg-white text-emerald-800' : 'border-blue-300 bg-white text-gray-800 focus:border-blue-600'}`}
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleDailyCountChecked(item)}
-                                    className={`text-[9px] font-bold px-2 py-0.5 rounded border transition-colors ${checked ? 'bg-white text-gray-500 border-gray-300 hover:bg-gray-100' : 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'}`}
-                                    title={checked ? 'ยกเลิกสถานะเช็คแล้ว' : 'กดเมื่อยังไม่ได้ใช้ปรุงอาหาร (หักเฉพาะของเสียถ้ามี)'}
-                                  >
-                                    {checked ? '↺ ยกเลิกเช็ค' : (wasteNum > 0 ? '✓ หักเสียแล้ว' : '✓ เท่ายอดเดิม')}
-                                  </button>
-                                </div>
+                            <div key={item.id} className={`border-2 p-1 rounded-lg flex flex-col gap-0.5 min-w-0 transition-colors ${isWarn ? 'bg-red-50 border-red-400' : checked ? 'bg-emerald-50 border-emerald-400' : 'bg-white border-gray-200'}`}>
+                              <div className="flex items-center justify-between gap-0.5 min-w-0">
+                                {item.code ? <span className="text-[8px] font-black px-1 rounded bg-gray-800 text-white leading-tight">{item.code}</span> : <span />}
+                                {checked && <span className="text-[8px] font-black text-emerald-700 leading-tight">✅{countData.checkedOrder ? countData.checkedOrder : ''}</span>}
                               </div>
-                              <div className="mt-auto pt-1">
-                                {countData.waste > 0 ? (
-                                  <div className="bg-red-50 border border-red-200 p-1.5 rounded-lg flex items-center justify-between shadow-sm">
-                                    <div className="text-[9px] text-red-800 truncate pr-1"><strong>เสีย: {countData.waste}</strong> <span className="opacity-70">({countData.reason})</span></div>
-                                    <button onClick={() => setShowWasteModal(item.id)} className="text-[9px] bg-white border border-red-300 text-red-600 px-1.5 py-0.5 rounded font-bold shrink-0 shadow-sm">แก้</button>
-                                  </div>
-                                ) : (
-                                  <button onClick={() => setShowWasteModal(item.id)} className="text-[10px] w-full text-center text-red-400 bg-gray-50/80 py-1 rounded-lg border border-gray-200 border-dashed hover:bg-red-50 hover:text-red-500 transition-colors">+ แจ้งของเสีย</button>
-                                )}
+                              <h4 className="font-bold text-gray-800 text-[10.5px] leading-tight break-words" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', minHeight: '2.5em' }} title={item.name}>{getItemName(item)}</h4>
+                              <div className="text-[9px] text-gray-600 leading-tight truncate" title={boughtQty > 0 ? `ยกมา ${openQty} + รับเข้า ${boughtQty}` : 'ยอดในระบบ'}>
+                                {boughtQty > 0
+                                  ? <>มี <strong className="text-gray-900">{formatNumber(availableQty)}</strong> <span className="text-green-700">(+{formatNumber(boughtQty)})</span></>
+                                  : <>มี <strong className="text-gray-900">{formatNumber(availableQty)}</strong></>} {item.unit}
                               </div>
+                              {currentCountPeriodInfo.isRetroactive && nextCloseRef !== undefined && (
+                                <div className="text-[8px] text-indigo-700 font-semibold leading-tight truncate" title={`ปิดรอบ ${currentCountPeriodInfo.nextCheck?.endDate}`}>📌 ถัดไป {formatNumber(nextCloseRef)}{nextBoughtRef > 0 ? ` (+${formatNumber(nextBoughtRef)})` : ''}</div>
+                              )}
+                              <input
+                                type="number"
+                                step="any"
+                                inputMode="decimal"
+                                placeholder={defaultUsableClose}
+                                value={countData.actual}
+                                onChange={(e) => handleDailyCountChange(item.id, e.target.value)}
+                                title="สต๊อกของดีที่เหลือใช้ได้จริง (ไม่รวมของเสีย)"
+                                className={`w-full px-1 py-1 border-2 rounded-md text-center font-black text-[13px] outline-none ${isWarn ? 'border-red-500 bg-white text-red-700' : checked ? 'border-emerald-500 bg-white text-emerald-800' : 'border-blue-300 bg-white text-gray-800 focus:border-blue-600'}`}
+                              />
+                              <div className="flex gap-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleDailyCountChecked(item)}
+                                  className={`flex-1 min-w-0 text-[9px] font-bold py-0.5 rounded border truncate ${checked ? 'bg-white text-gray-500 border-gray-300' : 'bg-emerald-50 text-emerald-700 border-emerald-300'}`}
+                                  title={checked ? 'ยกเลิกสถานะเช็คแล้ว' : 'นับได้เท่ายอดในระบบ (หักของเสียถ้ามี)'}
+                                >
+                                  {checked ? '↺ ยกเลิก' : '✓ เท่าเดิม'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowWasteModal(item.id)}
+                                  className={`shrink-0 text-[9px] font-bold px-1 py-0.5 rounded border ${wasteNum > 0 ? 'bg-red-600 text-white border-red-600' : 'bg-white text-red-500 border-red-200'}`}
+                                  title={wasteNum > 0 ? `ของเสีย ${wasteNum} ${item.unit}${countData.reason ? ' (' + countData.reason + ')' : ''} — กดเพื่อแก้` : 'แจ้งของเสีย'}
+                                >
+                                  🗑️{wasteNum > 0 ? formatNumber(wasteNum) : ''}
+                                </button>
+                              </div>
+                              {checked && !isWarn && (
+                                <div className="text-[8px] font-bold text-blue-700 leading-tight truncate">ใช้ {formatNumber(Math.max(0, previewUsed))}{wasteNum > 0 ? <span className="text-red-600"> · เสีย {formatNumber(wasteNum)}</span> : ''}</div>
+                              )}
+                              {isOverCount && (
+                                <div className="text-[8px] font-bold text-red-700 leading-tight">⚠️ เกินระบบ {formatNumber(Math.abs(previewUsed))}</div>
+                              )}
+                              {isConflictNext && (
+                                <div className="text-[8px] font-bold text-red-700 leading-tight">⚠️ น้อยกว่ารอบถัดไป ({formatNumber(nextCloseRef)})</div>
+                              )}
                             </div>
                           );
                         })}
@@ -3557,16 +3515,6 @@
                     </div>
                   );
                 })}
-
-                <div className="bg-white p-3 rounded-xl border border-gray-200 mt-4 shadow-[0_-4px_6px_-1px_rgb(0,0,0,0.05)] sticky bottom-4 z-10 w-full">
-                  {auth.role === 'staff' && (
-                    <>
-                      <label className="block text-[11px] font-bold text-gray-700 mb-1">ลงชื่อผู้ตรวจสอบ <span className="text-red-500">*</span></label>
-                      <input type="text" value={staffNameInput} onChange={(e) => setStaffNameInput(e.target.value)} maxLength="30" placeholder="พิมพ์ชื่อ (ไม่เกิน 30 ตัวอักษร)" className="w-full p-2.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 mb-3 shadow-inner" />
-                    </>
-                  )}
-                  <button onClick={submitDailyCount} className="w-full py-3.5 text-white font-bold rounded-xl shadow-md transition-all text-base bg-red-600 hover:bg-red-700 active:scale-95 flex justify-center items-center gap-2">✅ บันทึกและส่งยอดสต๊อกทั้งหมด ({checkedCount}/{allVisibleItems.length} รายการที่เช็ค)</button>
-                </div>
               </div>
               );
             })()}
