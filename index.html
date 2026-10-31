@@ -49,6 +49,23 @@
     const toLocalISO = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const getDaysAgo = (days) => { const d = new Date(); d.setDate(d.getDate() - days); return toLocalISO(d); };
     const getTodayFormatted = () => toLocalISO(new Date());
+    const addDaysDDMMYYYY = (strOrDate, days) => {
+      const d = parseDDMMYYYY(strOrDate);
+      if (isNaN(d.getTime())) return formatDDMMYYYY(new Date());
+      d.setDate(d.getDate() + days);
+      return formatDDMMYYYY(d);
+    };
+    const getBusinessDateBy4AM = () => {
+      const now = new Date();
+      if (now.getHours() < 4) now.setDate(now.getDate() - 1);
+      return formatDDMMYYYY(now);
+    };
+    const isPast4AMCutoffForDate = (dateStr) => {
+      const d = parseDDMMYYYY(dateStr);
+      if (isNaN(d.getTime())) return false;
+      const cutoff = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 4, 0, 0, 0);
+      return new Date() >= cutoff;
+    };
     const parseDDMMYYYY = (str) => { 
       if (!str) return new Date();
       if (str instanceof Date) return new Date(str.getFullYear(), str.getMonth(), str.getDate());
@@ -277,17 +294,24 @@
             demoReceipts.push({ id: Date.now() - i * 10000, date: dStr, vendor: billItems[0].item.vendor || 'ตลาดสด', method: i === 2 ? 'ยังไม่ชำระ' : 'เงินสด', total: billTotal, items: billItems });
           }
 
-          // สร้างยอดขายรายวันทุกวัน (รวมถึงวันที่ยังไม่ได้เช็คสต๊อก เพื่อทดสอบระบบถ่วงน้ำหนักและระบบเตือน)
+          // สร้างยอดขายรายวันทุกวัน (รวมถึงตัวอย่างการลงยอดขาย 2 รอบในวันเดียวกัน บวกทบอัตโนมัติ)
           const cashAmt = 8000 + (i % 3) * 2500;
           const transferAmt = 5000 + (i % 4) * 1500;
           const grabBefore = 3000; const grabAfter = 2100;
           const linemanBefore = 2000; const linemanAfter = 1400;
+          const demoRounds = (i <= 2) ? [
+            { id: `rnd-demo-${i}-1`, roundNo: 1, cash: Math.round(cashAmt * 0.45), transfer: Math.round(transferAmt * 0.4), grab: { before: 1200, after: 840 }, lineman: { before: 800, after: 560 }, credits: [] },
+            { id: `rnd-demo-${i}-2`, roundNo: 2, cash: cashAmt - Math.round(cashAmt * 0.45), transfer: transferAmt - Math.round(transferAmt * 0.4), grab: { before: 1800, after: 1260 }, lineman: { before: 1200, after: 840 }, credits: [] }
+          ] : [
+            { id: `rnd-demo-${i}-1`, roundNo: 1, cash: cashAmt, transfer: transferAmt, grab: { before: grabBefore, after: grabAfter }, lineman: { before: linemanBefore, after: linemanAfter }, credits: [] }
+          ];
           demoSales.push({
             id: `dsr-demo-${i}`, date: dStr, closedDay: false,
             cash: cashAmt, transfer: transferAmt,
             grab: { before: grabBefore, after: grabAfter },
             lineman: { before: linemanBefore, after: linemanAfter },
-            credits: []
+            credits: [],
+            rounds: demoRounds
           });
 
           if (!isSkipped) {
@@ -316,7 +340,7 @@
             });
             const startMs = parseDDMMYYYY(startDStr); const endMs = parseDDMMYYYY(dStr);
             const periodSales = demoSales.filter(r => { const m = parseDDMMYYYY(r.date); return m >= startMs && m <= endMs; }).reduce((s, r) => s + r.cash + r.transfer + r.grab.after + r.lineman.after, 0);
-            demoHistory.push({ id: `mock-${i}`, date: dStr, startDate: startDStr, endDate: dStr, days: daysDiff, type: 'checked', sales: periodSales, totalOpeningVal: round2(tO), totalBoughtVal: round2(tB), totalUsedVal: round2(tU), totalWasteVal: round2(tW), totalClosingVal: round2(tC), details: dayDetails });
+            demoHistory.push({ id: `mock-${i}`, date: dStr, startDate: startDStr, endDate: dStr, days: daysDiff, type: 'checked', isDayClosed: true, sales: periodSales, totalOpeningVal: round2(tO), totalBoughtVal: round2(tB), totalUsedVal: round2(tU), totalWasteVal: round2(tW), totalClosingVal: round2(tC), details: dayDetails });
           }
 
           if (i % 2 === 1) demoExpenses.push({ id: `exp-${i}-1`, date: dStr, name: 'น้ำแข็ง', amount: 150, payMethod: 'เงินสด' });
@@ -342,7 +366,7 @@
       };
 
       useEffect(() => {
-        let unsubscribeSnapshot = null; let unsubscribeCatalog = null; let isMounted = true; setIsDataLoaded(false); setIsSyncActive(false); lastSavedPayload.current = null; if (selectedBranch !== CATALOG_BRANCH) { setCatalog({}); setCatalogLoaded(false); }
+        let unsubscribeSnapshot = null; let unsubscribeCatalog = null; let isMounted = true; setIsDataLoaded(false); setIsSyncActive(false); lastSavedPayload.current = null; lastLoadedActiveDateRef.current = null; if (selectedBranch !== CATALOG_BRANCH) { setCatalog({}); setCatalogLoaded(false); }
         const initFirebase = async () => {
           try {
             while (!window.FirebaseAPI) { await new Promise(r => setTimeout(r, 100)); }
@@ -366,8 +390,10 @@
               }
               if (loadedData) {
                 const migD = (arr) => Array.isArray(arr) ? arr.filter(x => x).map(x => ({...x, date: (x.date && typeof x.date === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.date)) : x.date, endDate: (x.endDate && typeof x.endDate === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.endDate)) : x.endDate, startDate: (x.startDate && typeof x.startDate === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.startDate)) : x.startDate, lastMoved: (x.lastMoved && typeof x.lastMoved === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.lastMoved)) : x.lastMoved })) : [];
+                const histMig = migD(loadedData.dailyHistory);
+                const salesMig = migD(loadedData.dailySalesRecords);
                 setInventory(Array.isArray(loadedData.inventory) ? loadedData.inventory.filter(x => x).map(x => ({...x, lastMoved: (x.lastMoved && typeof x.lastMoved === 'string') ? formatDDMMYYYY(parseDDMMYYYY(x.lastMoved)) : x.lastMoved})) : []); 
-                setDailyHistory(migD(loadedData.dailyHistory)); 
+                setDailyHistory(histMig); 
                 setReceipts(migD(loadedData.receipts));
                 if (loadedData.vendors) setVendors(loadedData.vendors); else setVendors(['ตลาดสด', 'Makro', 'ร้านเจ๊หมวย']); 
                 if (loadedData.categoryOrder) setCategoryOrder(loadedData.categoryOrder); else setCategoryOrder(['เนื้อสัตว์', 'อาหารทะเล', 'ผักสด', 'ของแห้ง', 'เครื่องปรุง', 'เครื่องดื่ม', 'อื่นๆ']);
@@ -375,7 +401,33 @@
                 setDailyExpenses(migD(loadedData.dailyExpenses).filter(e => e.date && !isNaN(parseDDMMYYYY(e.date).getTime()))); 
                 setMonthlyOverheads(loadedData.monthlyOverheads || {});
                 if (loadedData.expenseCategories) setExpCats(loadedData.expenseCategories); else setExpCats(['ค่าแก๊ส', 'น้ำแข็ง', 'ซื้อของจุกจิก', 'ค่าซ่อมบำรุง']);
-                setDailySalesRecords(migD(loadedData.dailySalesRecords)); setCashDeposits(migD(loadedData.cashDeposits));
+                setDailySalesRecords(salesMig); setCashDeposits(migD(loadedData.cashDeposits));
+
+                // คำนวณวันทำการเช็คสต๊อกปัจจุบัน (Active Stock Date) ตามกฎ 04:00 น. และสถานะปิดรอบสิ้นวัน
+                const calTodayStr = formatDDMMYYYY(new Date());
+                const calYesterdayStr = addDaysDDMMYYYY(calTodayStr, -1);
+                const todayRec = histMig.find(h => (h.endDate === calTodayStr || h.date === calTodayStr) && h.type === 'checked');
+                const yesterdayRec = histMig.find(h => (h.endDate === calYesterdayStr || h.date === calYesterdayStr) && h.type === 'checked');
+                let resolvedActiveDate = loadedData.activeStockDate ? formatDDMMYYYY(parseDDMMYYYY(loadedData.activeStockDate)) : '';
+                if (!resolvedActiveDate || parseDDMMYYYY(resolvedActiveDate) < parseDDMMYYYY(calYesterdayStr)) {
+                  if (todayRec?.isDayClosed) {
+                    resolvedActiveDate = addDaysDDMMYYYY(calTodayStr, 1);
+                  } else if (todayRec) {
+                    resolvedActiveDate = calTodayStr;
+                  } else if (yesterdayRec && yesterdayRec.isDayClosed !== false) {
+                    resolvedActiveDate = calTodayStr;
+                  } else if (new Date().getHours() < 4 || (yesterdayRec && yesterdayRec.isDayClosed === false) || salesMig.some(s => s.date === calYesterdayStr)) {
+                    resolvedActiveDate = calYesterdayStr;
+                  } else {
+                    resolvedActiveDate = getBusinessDateBy4AM();
+                  }
+                }
+                setActiveStockDate(resolvedActiveDate);
+                if (lastLoadedActiveDateRef.current !== resolvedActiveDate) {
+                  lastLoadedActiveDateRef.current = resolvedActiveDate;
+                  setCountDate(toInputDate(resolvedActiveDate));
+                }
+
                 const bytes = isComp && docSnap.data().compressedPayload ? docSnap.data().compressedPayload.length : new TextEncoder().encode(JSON.stringify(loadedData)).length;
                 setDbSizeInfo({ kbLength: (bytes / 1024).toFixed(1), percentUsed: ((bytes / 1048576) * 100).toFixed(2), estDaysLeft: loadedData.dailyHistory?.length > 0 ? Math.floor((1048576 - bytes) / (bytes / loadedData.dailyHistory.length)) : 'N/A', isCompressed: isComp });
               } else {
@@ -395,7 +447,7 @@
         if (!db || !isSyncActive || !isDataLoaded) return;
         const saveToFirebase = async () => {
           try {
-            const fullData = { inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expenseCategories: expCats, dailySalesRecords, cashDeposits };
+            const fullData = { inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expenseCategories: expCats, dailySalesRecords, cashDeposits, activeStockDate };
             const compressedBase64 = compressData(fullData);
             if(compressedBase64) {
               if (compressedBase64 !== lastSavedPayload.current) { lastSavedPayload.current = compressedBase64; await window.FirebaseAPI.setDoc(window.FirebaseAPI.doc(db, "restaurant_data", selectedBranch), { compressedPayload: compressedBase64, lastUpdated: new Date().toISOString() }); }
@@ -409,7 +461,7 @@
         };
         const timer = setTimeout(saveToFirebase, 2500); 
         return () => clearTimeout(timer);
-      }, [inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expCats, dailySalesRecords, cashDeposits, db, isSyncActive, selectedBranch, isDataLoaded]);
+      }, [inventory, dailyHistory, receipts, categoryOrder, vendors, pendingPOs, dailyExpenses, monthlyOverheads, expCats, dailySalesRecords, cashDeposits, activeStockDate, db, isSyncActive, selectedBranch, isDataLoaded]);
 
       // Reconcile local inventory with the shared catalog: add new recipe ingredients, follow renames,
       // follow market/custom prices set in the cost app, and give every item a code (stock-only display).
@@ -492,7 +544,11 @@
       const [dailyCountFilter, setDailyCountFilter] = useState('all'); // 'all' | 'unchecked' | 'checked'
       const [showWasteModal, setShowWasteModal] = useState(null); 
       const [staffNameInput, setStaffNameInput] = useState('');
-      const [countDate, setCountDate] = useState(getTodayFormatted());
+      const [activeStockDate, setActiveStockDate] = useState(() => getBusinessDateBy4AM());
+      const [countDate, setCountDate] = useState(() => toInputDate(getBusinessDateBy4AM()));
+      const lastLoadedActiveDateRef = useRef(null);
+      const [stockSubmitModal, setStockSubmitModal] = useState(null);
+      const [lastClosedDayNotice, setLastClosedDayNotice] = useState(null);
       // AP (Accounts Payable) สำหรับจัดการบิลค้างชำระ
       const [apSortMode, setApSortMode] = useState('amount'); // 'amount' | 'name'
       const [apExpandedVendor, setApExpandedVendor] = useState(null);
@@ -503,8 +559,8 @@
       // แก้ไขยอดค่าใช้จ่าย inline edit
       const [editingExpId, setEditingExpId] = useState(null);
       const [editingExpAmount, setEditingExpAmount] = useState('');
-      // ===== ระบบบันทึกยอดขายรายวันตามวิธีชำระ =====
-      const [dailySalesRecords, setDailySalesRecords] = useState([]); // [{id,date,closedDay,cash,transfer,grab:{before,after},lineman:{before,after},credits:[{name,amount}]}]
+      // ===== ระบบบันทึกยอดขายรายวันตามวิธีชำระ (รองรับหลายรอบในวันเดียวกัน บวกทบอัตโนมัติ) =====
+      const [dailySalesRecords, setDailySalesRecords] = useState([]); // [{id,date,closedDay,cash,transfer,grab:{before,after},lineman:{before,after},credits:[{name,amount}],rounds:[...]}]
       const [cashDeposits, setCashDeposits] = useState([]); // [{id,date,amount,note}]
       // UI States สำหรับ Card บันทึกยอดขาย
       const [salesRecordDate, setSalesRecordDate] = useState(() => formatDDMMYYYY(new Date()));
@@ -516,6 +572,7 @@
       const [srLinemanAfter, setSrLinemanAfter] = useState('');
       const [srCredits, setSrCredits] = useState([{ name: '', amount: '' }]); // [{name,amount}]
       const [srEditId, setSrEditId] = useState(null); // id ของ record ที่กำลังแก้ไข
+      const [srEditRoundId, setSrEditRoundId] = useState(null); // id ของรอบขายย่อยที่กำลังแก้ไข
       // UI States สำหรับหน้าเงินสด
       const [cashMgmtDepositDate, setCashMgmtDepositDate] = useState(() => formatDDMMYYYY(new Date()));
       const [cashMgmtDepositAmt, setCashMgmtDepositAmt] = useState('');
@@ -1348,9 +1405,9 @@
         setItemModal({ isOpen: false, mode: 'add', sourceTab: 'manage', data: null });
       };
 
-      // คำนวณช่วงวันของรอบเช็คสต๊อกปัจจุบัน (รองรับทั้งวันปัจจุบัน, การแก้ไขวันเดิม, และการลงสต๊อกย้อนหลังแทรกในวันที่เคยข้ามไปแล้ว)
-      const currentCountPeriodInfo = useMemo(() => {
-        const endDateStr = formatDDMMYYYY(parseDDMMYYYY(countDate));
+      // ฟังก์ชันคำนวณช่วงวันและยอดยกมาของรอบเช็คสต๊อกสำหรับวันที่ต้องการ
+      const computePeriodInfoForDate = (targetDateInput) => {
+        const endDateStr = formatDDMMYYYY(parseDDMMYYYY(targetDateInput));
         const endObj = parseDDMMYYYY(endDateStr);
         const existingSameDay = dailyHistory.find(h => (h.endDate === endDateStr || h.date === endDateStr) && h.type === 'checked');
         const prevChecks = dailyHistory
@@ -1448,7 +1505,33 @@
           existingSameDay, prevCheck, nextCheck, isRetroactive,
           boughtByItem, openByItem, nextCloseByItem, nextWasteByItem, boughtInNextSubPeriod
         };
-      }, [countDate, dailyHistory, receipts, inventory]);
+      };
+
+      // คำนวณช่วงวันของรอบเช็คสต๊อกปัจจุบัน (รองรับทั้งวันปัจจุบัน, การแก้ไขวันเดิม, และการลงสต๊อกย้อนหลังแทรกในวันที่เคยข้ามไปแล้ว)
+      const currentCountPeriodInfo = useMemo(() => computePeriodInfoForDate(countDate), [countDate, dailyHistory, receipts, inventory]);
+
+      // ตรวจสอบสถานะหลัง 04:00 น. ว่ามีรอบวันก่อนหน้าที่ยังไม่ได้ส่งยอดปิดสิ้นวันหรือไม่
+      const unclosedPrevDayAfter4AMInfo = useMemo(() => {
+        const now = new Date();
+        const calTodayStr = formatDDMMYYYY(now);
+        const calYesterdayStr = addDaysDDMMYYYY(calTodayStr, -1);
+        const isAfter4AM = now.getHours() >= 4;
+        const yesterdayRec = dailyHistory.find(h => (h.endDate === calYesterdayStr || h.date === calYesterdayStr) && h.type === 'checked');
+        const todayRec = dailyHistory.find(h => (h.endDate === calTodayStr || h.date === calTodayStr) && h.type === 'checked');
+        const normActive = activeStockDate ? formatDDMMYYYY(parseDDMMYYYY(activeStockDate)) : calYesterdayStr;
+        const isYesterdayClosed = yesterdayRec ? (yesterdayRec.isDayClosed !== false) : false;
+        const isRolledOverToToday = parseDDMMYYYY(normActive) >= parseDDMMYYYY(calTodayStr) || !!todayRec;
+        const isAlertActive = isAfter4AM && !isYesterdayClosed && !isRolledOverToToday;
+        return {
+          isAfter4AM,
+          calTodayStr,
+          calYesterdayStr,
+          unclosedDate: calYesterdayStr,
+          isYesterdayClosed,
+          isRolledOverToToday,
+          isAlertActive
+        };
+      }, [dailyHistory, activeStockDate, countDate]);
 
       const handleDailyCountChange = (id, value) => {
         setDailyCounts(prev => {
@@ -1620,13 +1703,48 @@
           if (!window.confirm(`⚠️ คำเตือน (โหมดลงสต๊อกย้อนหลัง): พบรายการที่มียอดคงเหลือน้อยกว่ายอดนับปิดของรอบถัดไป (${nextCheck.endDate}):\n\n${conflictNextItems.slice(0, 8).join('\n')}\n\nต้องการยืนยันบันทึกหรือไม่?`)) return;
         }
 
-        if (existingSameDay) {
-          if (!window.confirm(`⚠️ วันที่ ${endDateStr} มีการบันทึกสต๊อกไว้แล้ว ยืนยันการบันทึกทับและคำนวณต้นทุนทุกรอบที่เกี่ยวข้องใหม่หรือไม่?`)) return;
-        } else if (isRetroactive) {
-          if (!window.confirm(`⏳ ยืนยันการลงสต๊อกย้อนหลังประจำวันที่ ${endDateStr}?\n\n• รอบนี้จะครอบคลุม: ${startDateStr} ถึง ${endDateStr} (${daysDiff} วัน)\n• ระบบจะแยกคิดต้นทุนจริงของวันที่ ${endDateStr} และปรับปรุงยอดยกมา + คำนวณต้นทุนของรอบถัดไป (${nextCheck.endDate}) ใหม่ให้อัตโนมัติทั้งหมด`)) return;
+        // ตรวจสอบว่าเข้าเงื่อนไขเตือนหลัง 04:00 น. หรือไม่
+        const isTargetPast4AM = !isRetroactive && isPast4AMCutoffForDate(endDateStr);
+        const hasUnclosedPrevDayAfter4AM = !isRetroactive && unclosedPrevDayAfter4AMInfo.isAlertActive;
+        const show4AMMode = isTargetPast4AM || hasUnclosedPrevDayAfter4AM;
+
+        if (isRetroactive) {
+          setStockSubmitModal({
+            mode: 'retroactive',
+            prevDateStr: endDateStr,
+            newDateStr: endDateStr,
+            selectedTargetDate: endDateStr,
+            rolloverConfirmed: true,
+            isRetroactive: true
+          });
+        } else if (show4AMMode) {
+          const prevDateStr = isTargetPast4AM ? endDateStr : unclosedPrevDayAfter4AMInfo.unclosedDate;
+          const calTodayStr = formatDDMMYYYY(new Date());
+          const nextDayCandidate = addDaysDDMMYYYY(prevDateStr, 1);
+          const newDateStr = parseDDMMYYYY(calTodayStr) > parseDDMMYYYY(prevDateStr) ? calTodayStr : nextDayCandidate;
+          setStockSubmitModal({
+            mode: 'after4am',
+            prevDateStr,
+            newDateStr,
+            selectedTargetDate: prevDateStr,
+            rolloverConfirmed: false, // บังคับให้ติ๊กเลือกก่อนกดส่งยอด
+            isRetroactive: false
+          });
         } else {
-          if (!window.confirm(`ยืนยันการส่งยอดสต๊อกประจำวันที่ ${endDateStr}?\n(รอบบิล: ${startDateStr} ถึง ${endDateStr} รวม ${daysDiff} วัน)`)) return;
+          setStockSubmitModal({
+            mode: 'normal',
+            prevDateStr: endDateStr,
+            newDateStr: addDaysDDMMYYYY(endDateStr, 1),
+            selectedTargetDate: endDateStr,
+            rolloverConfirmed: false, // false = อัปเดตระหว่างวัน, true = ปิดรอบสุดท้ายเพื่อเปลี่ยนวัน
+            isRetroactive: false
+          });
         }
+      };
+
+      const executeSubmitDailyCount = (targetDateStr, isFinalCloseDay = false, rolloverToDateStr = null) => {
+        const pInfo = computePeriodInfoForDate(targetDateStr);
+        const { startDateStr, endDateStr, daysDiff, existingSameDay, nextCheck, isRetroactive, boughtByItem, openByItem } = pInfo;
 
         const draftDetails = [];
         inventory.forEach(item => {
@@ -1669,6 +1787,7 @@
           endDate: endDateStr,
           days: daysDiff,
           type: 'checked',
+          isDayClosed: isRetroactive ? true : !!isFinalCloseDay,
           sales: existingSameDay ? existingSameDay.sales : null,
           totalOpeningVal: 0,
           totalBoughtVal: 0,
@@ -1689,17 +1808,29 @@
         setInventory(recalc.inventory);
 
         const savedRec = recalc.dailyHistory.find(h => (h.endDate || h.date) === endDateStr);
-        // อัปเดตหน้าเช็คสต๊อกให้แสดงตัวเลขคงเหลือใหม่ที่เพิ่งบันทึกทันที (ไม่กลับไปเป็นตัวเลขก่อนเช็ค)
-        if (savedRec) {
-          setDailyCounts(buildCountsFromHistoryRecord(savedRec));
-        }
+        setStockSubmitModal(null);
         setStaffNameInput('');
-        if (isRetroactive) {
-          alert(`✅ บันทึกสต๊อกย้อนหลังวันที่ ${endDateStr} สำเร็จ!\nระบบได้แยกคำนวณต้นทุนจริงของวันที่ ${endDateStr} และปรับปรุงยอดยกมา/ต้นทุนของรอบถัดไป (${nextCheck.endDate}) ใหม่เรียบร้อยแล้ว`);
-        } else if (savedRec && savedRec.sales != null) {
-          alert(`✅ บันทึกและอัปเดตยอดสต๊อกวันที่ ${endDateStr} สำเร็จ!\n(จับคู่ยอดขายอัตโนมัติ ${formatMoney(savedRec.sales)} บาท เรียบร้อย)`);
+
+        if (isFinalCloseDay && !isRetroactive && rolloverToDateStr) {
+          const normRollover = formatDDMMYYYY(parseDDMMYYYY(rolloverToDateStr));
+          lastLoadedActiveDateRef.current = normRollover;
+          setActiveStockDate(normRollover);
+          setCountDate(toInputDate(normRollover));
+          setLastClosedDayNotice({ closedDate: endDateStr, newDate: normRollover, matchedSales: savedRec?.sales });
         } else {
-          alert(`✅ บันทึกและอัปเดตยอดสต๊อกวันที่ ${endDateStr} สำเร็จ!`);
+          // กรณีเช็คระหว่างวัน หรือลงย้อนหลัง ให้คงหน้าอยู่ที่วันเดิมและแสดงยอดคงเหลือใหม่ทันที
+          setCountDate(toInputDate(endDateStr));
+          if (savedRec) {
+            setDailyCounts(buildCountsFromHistoryRecord(savedRec));
+          }
+          setLastClosedDayNotice(null);
+          if (isRetroactive) {
+            alert(`✅ บันทึกสต๊อกย้อนหลังวันที่ ${endDateStr} สำเร็จ!\nระบบได้แยกคำนวณต้นทุนจริงของวันที่ ${endDateStr} และปรับปรุงยอดยกมา/ต้นทุนของรอบถัดไป (${nextCheck?.endDate}) ใหม่เรียบร้อยแล้ว`);
+          } else if (savedRec && savedRec.sales != null) {
+            alert(`✅ บันทึกอัปเดตสต๊อกระหว่างวัน (${endDateStr}) สำเร็จ!\n(จับคู่ยอดขายอัตโนมัติ ${formatMoney(savedRec.sales)} บาท — สามารถกลับมาเช็คเพิ่มหรือกดปิดรอบสิ้นวันได้ตลอดเวลา)`);
+          } else {
+            alert(`✅ บันทึกอัปเดตสต๊อกระหว่างวัน (${endDateStr}) สำเร็จ!\n(ยังไม่เปลี่ยนวัน — สามารถกลับมาเช็คเพิ่มหรือกดปิดรอบสิ้นวันได้ตลอดเวลา)`);
+          }
         }
       };
 
@@ -1852,7 +1983,98 @@
       const triggerPrint = (data) => setPrintData(data);
       const toggleHistoryRow = (date) => setExpandedHistoryDate(expandedHistoryDate === date ? null : date);
 
-      // ===== DAILY SALES RECORD HELPERS =====
+      // ===== DAILY SALES RECORD HELPERS (รองรับบันทึกหลายรอบในวันเดียว บวกทบอัตโนมัติ) =====
+
+      // คำนวณยอดขายของรอบย่อย 1 รอบ
+      const calcRoundSalesTotal = (rnd) => {
+        if (!rnd) return 0;
+        const grabAmt = (rnd.grab?.after != null && rnd.grab?.after !== '') ? Number(rnd.grab.after) : Number(rnd.grab?.before || 0);
+        const linemanAmt = (rnd.lineman?.after != null && rnd.lineman?.after !== '') ? Number(rnd.lineman.after) : Number(rnd.lineman?.before || 0);
+        const creditTotal = (rnd.credits || []).reduce((s, c) => s + Number(c.amount || 0), 0);
+        return Number(rnd.cash || 0) + Number(rnd.transfer || 0) + grabAmt + linemanAmt + creditTotal;
+      };
+
+      // ดึงรายการรอบขายย่อยของวันนั้น (เรียงรอบที่ 1 ขึ้นก่อน -> รอบที่ 2 -> รอบที่ 3...)
+      const getRecordRounds = (record) => {
+        if (!record || record.closedDay) return [];
+        if (Array.isArray(record.rounds) && record.rounds.length > 0) {
+          return record.rounds.map((r, idx) => ({
+            ...r,
+            id: r.id || `rnd-${idx + 1}`,
+            roundNo: idx + 1
+          }));
+        }
+        const legacyTotal = calcRoundSalesTotal(record);
+        if (legacyTotal <= 0) return [];
+        return [{
+          id: `rnd-legacy-${record.id || '1'}`,
+          roundNo: 1,
+          cash: Number(record.cash) || 0,
+          transfer: Number(record.transfer) || 0,
+          grab: { before: Number(record.grab?.before) || 0, after: (record.grab?.after != null && record.grab?.after !== '') ? Number(record.grab.after) : null },
+          lineman: { before: Number(record.lineman?.before) || 0, after: (record.lineman?.after != null && record.lineman?.after !== '') ? Number(record.lineman.after) : null },
+          credits: Array.isArray(record.credits) ? record.credits : []
+        }];
+      };
+
+      // รวมยอดจากทุกรอบในวันนั้นเป็นยอดสะสมรายวัน
+      const aggregateRoundsToRecord = (date, roundsList, existingId = null) => {
+        let cash = 0;
+        let transfer = 0;
+        let grabBefore = 0;
+        let grabAfterSum = 0;
+        let hasGrabAfter = false;
+        let linemanBefore = 0;
+        let linemanAfterSum = 0;
+        let hasLinemanAfter = false;
+        const creditMap = new Map();
+
+        const normalizedRounds = (roundsList || []).map((r, idx) => {
+          const cVal = Number(r.cash || 0);
+          const tVal = Number(r.transfer || 0);
+          const gb = Number(r.grab?.before || 0);
+          const ga = (r.grab?.after != null && r.grab?.after !== '') ? Number(r.grab.after) : null;
+          const lb = Number(r.lineman?.before || 0);
+          const la = (r.lineman?.after != null && r.lineman?.after !== '') ? Number(r.lineman.after) : null;
+          const crList = (r.credits || []).filter(c => c.name || Number(c.amount) > 0).map(c => ({ name: (c.name || '').trim(), amount: Number(c.amount) || 0 }));
+
+          cash += cVal;
+          transfer += tVal;
+          grabBefore += gb;
+          if (ga !== null) { hasGrabAfter = true; grabAfterSum += ga; }
+          else if (gb > 0) { grabAfterSum += gb; }
+          linemanBefore += lb;
+          if (la !== null) { hasLinemanAfter = true; linemanAfterSum += la; }
+          else if (lb > 0) { linemanAfterSum += lb; }
+          crList.forEach(c => {
+            const key = c.name || 'ไม่ระบุชื่อ';
+            creditMap.set(key, round2((creditMap.get(key) || 0) + c.amount));
+          });
+
+          return {
+            id: r.id || `rnd-${Date.now()}-${idx + 1}`,
+            roundNo: idx + 1,
+            cash: round2(cVal),
+            transfer: round2(tVal),
+            grab: { before: round2(gb), after: ga !== null ? round2(ga) : null },
+            lineman: { before: round2(lb), after: la !== null ? round2(la) : null },
+            credits: crList
+          };
+        });
+
+        const credits = Array.from(creditMap.entries()).map(([name, amount]) => ({ name, amount }));
+        return {
+          id: existingId || `dsr-${Date.now()}`,
+          date,
+          closedDay: false,
+          cash: round2(cash),
+          transfer: round2(transfer),
+          grab: { before: round2(grabBefore), after: hasGrabAfter ? round2(grabAfterSum) : null },
+          lineman: { before: round2(linemanBefore), after: hasLinemanAfter ? round2(linemanAfterSum) : null },
+          credits,
+          rounds: normalizedRounds
+        };
+      };
 
       // คำนวณยอดขายรวมในวันนั้น
       const calcDailySalesTotal = (record) => {
@@ -1956,62 +2178,143 @@
         return withCumulative.reverse(); // กลับมาใหม่สุดบน
       }, [dailySalesRecords, cashDeposits, dailyExpenses, receipts, monthlyOverheads]);
 
-      // โหลดข้อมูล record มาใส่ form เพื่อแก้ไข
+      // โหลดข้อมูลรอบย่อย (Round) มาใส่ form เพื่อแก้ไขเฉพาะรอบนั้น
+      const loadSalesRoundForEdit = (dateStr, roundObj, recordId = null) => {
+        const dFmt = formatDDMMYYYY(parseDDMMYYYY(dateStr));
+        setSalesRecordDate(dFmt);
+        setSrEditId(recordId);
+        setSrEditRoundId(roundObj.id);
+        setSrCash(roundObj.cash || '');
+        setSrTransfer(roundObj.transfer || '');
+        setSrGrabBefore(roundObj.grab?.before || '');
+        setSrGrabAfter(roundObj.grab?.after != null ? roundObj.grab.after : '');
+        setSrLinemanBefore(roundObj.lineman?.before || '');
+        setSrLinemanAfter(roundObj.lineman?.after != null ? roundObj.lineman.after : '');
+        setSrCredits(roundObj.credits?.length > 0 ? roundObj.credits.map(c => ({ name: c.name, amount: String(c.amount) })) : [{ name: '', amount: '' }]);
+      };
+
+      // โหลดข้อมูล record มาใส่ form (หากมีรอบย่อย ให้โหลดรอบที่ 1 มาแก้ไข หรือเลือกวันนั้นเพื่อดูทุกรอบ)
       const loadSalesRecordForEdit = (record) => {
-        setSrEditId(record.id);
-        setSalesRecordDate(formatDDMMYYYY(parseDDMMYYYY(record.date)));
-        setSrCash(record.cash || '');
-        setSrTransfer(record.transfer || '');
-        setSrGrabBefore(record.grab?.before || '');
-        setSrGrabAfter(record.grab?.after != null ? record.grab.after : '');
-        setSrLinemanBefore(record.lineman?.before || '');
-        setSrLinemanAfter(record.lineman?.after != null ? record.lineman.after : '');
-        setSrCredits(record.credits?.length > 0 ? record.credits.map(c => ({name: c.name, amount: String(c.amount)})) : [{ name: '', amount: '' }]);
+        const dFmt = formatDDMMYYYY(parseDDMMYYYY(record.date));
+        const rounds = getRecordRounds(record);
+        if (rounds.length > 0) {
+          loadSalesRoundForEdit(dFmt, rounds[0], record.id);
+        } else {
+          setSalesRecordDate(dFmt);
+          resetSalesRecordForm();
+        }
       };
 
       const resetSalesRecordForm = () => {
-        setSrEditId(null); setSrCash(''); setSrTransfer(''); setSrGrabBefore(''); setSrGrabAfter('');
+        setSrEditId(null); setSrEditRoundId(null); setSrCash(''); setSrTransfer(''); setSrGrabBefore(''); setSrGrabAfter('');
         setSrLinemanBefore(''); setSrLinemanAfter(''); setSrCredits([{ name: '', amount: '' }]);
       };
 
-      // บันทึก/อัพเดต daily sales record
+      // บันทึก/อัปเดต daily sales record (รองรับบันทึกมากกว่า 1 รอบในวันเดียวกันแล้วบวกทบยอดอัตโนมัติ)
       const saveDailySalesRecord = (closedDay = false) => {
         const date = formatDDMMYYYY(parseDDMMYYYY(salesRecordDate));
         if (!date) return alert('กรุณาเลือกวันที่');
+        const existingSameDay = dailySalesRecords.find(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === date);
+
+        if (closedDay) {
+          if (existingSameDay && !existingSameDay.closedDay) {
+            if (!window.confirm(`⚠️ วันที่ ${date} มีการบันทึกยอดขายไว้แล้ว ยืนยันตั้งเป็น "วันร้านปิด (ยอดขาย 0)" และล้างรอบขายของวันนี้หรือไม่?`)) return;
+          }
+          const closedRec = {
+            id: existingSameDay?.id || srEditId || `dsr-${Date.now()}`,
+            date,
+            closedDay: true,
+            cash: 0,
+            transfer: 0,
+            grab: { before: 0, after: null },
+            lineman: { before: 0, after: null },
+            credits: [],
+            rounds: []
+          };
+          const nextSalesList = [
+            closedRec,
+            ...dailySalesRecords.filter(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) !== date)
+          ].sort((a, b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
+          setDailySalesRecords(nextSalesList);
+          const recalc = recalculateTimeline(inventory, dailyHistory, receipts, nextSalesList);
+          setDailyHistory(recalc.dailyHistory);
+          resetSalesRecordForm();
+          return;
+        }
+
         const filteredCredits = srCredits.filter(c => c.name || Number(c.amount) > 0);
-        const record = {
-          id: srEditId || `dsr-${Date.now()}`,
-          date,
-          closedDay,
+        const roundDraft = {
+          id: srEditRoundId || `rnd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           cash: Number(srCash) || 0,
           transfer: Number(srTransfer) || 0,
           grab: { before: Number(srGrabBefore) || 0, after: srGrabAfter !== '' ? Number(srGrabAfter) : null },
           lineman: { before: Number(srLinemanBefore) || 0, after: srLinemanAfter !== '' ? Number(srLinemanAfter) : null },
-          credits: filteredCredits.map(c => ({ name: c.name.trim(), amount: Number(c.amount) || 0 })),
+          credits: filteredCredits.map(c => ({ name: c.name.trim(), amount: Number(c.amount) || 0 }))
         };
-        if (closedDay) { record.cash = 0; record.transfer = 0; record.grab = { before: 0, after: null }; record.lineman = { before: 0, after: null }; record.credits = []; }
-        setDailySalesRecords(prev => {
-          const exists = prev.find(r => r.id === record.id);
-          if (exists) return prev.map(r => r.id === record.id ? record : r);
-          // ตรวจว่าวันนั้นมีอยู่แล้วหรือไม่
-          const sameDayIdx = prev.findIndex(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === date);
-          if (sameDayIdx > -1) return prev.map((r, i) => i === sameDayIdx ? record : r);
-          return [...prev, record].sort((a, b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
-        });
-        resetSalesRecordForm();
-        // Auto-update pending dailyHistory records ที่มีช่วงวันครอบคลุมวันนั้น
-        setDailyHistory(prev => prev.map(h => {
-          if (h.sales === null && h.type === 'checked') {
-            const { total, covered } = getSalesForRange(h.startDate || h.date, h.endDate || h.date);
-            if (covered > 0) return { ...h, _autoSales: total };
+
+        if (calcRoundSalesTotal(roundDraft) <= 0) {
+          return alert('กรุณาระบุยอดขายอย่างน้อย 1 ช่องทาง (หรือกดปุ่ม "🔒 ร้านปิด" หากวันนี้ร้านปิด)');
+        }
+
+        let nextRounds = [];
+        if (existingSameDay && !existingSameDay.closedDay) {
+          const prevRounds = getRecordRounds(existingSameDay);
+          if (srEditRoundId && prevRounds.some(r => r.id === srEditRoundId)) {
+            nextRounds = prevRounds.map(r => r.id === srEditRoundId ? { ...roundDraft, id: r.id } : r);
+          } else {
+            nextRounds = [...prevRounds, roundDraft];
           }
-          return h;
-        }));
+        } else {
+          nextRounds = [roundDraft];
+        }
+
+        const updatedRecord = aggregateRoundsToRecord(date, nextRounds, existingSameDay?.id || srEditId);
+        // เรียงวันที่ใหม่ขึ้นก่อน (Descending by date) ส่วนรอบขายภายในวันเรียงรอบที่ 1 -> 2 -> 3 (Ascending)
+        const nextSalesList = [
+          updatedRecord,
+          ...dailySalesRecords.filter(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) !== date)
+        ].sort((a, b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
+
+        setDailySalesRecords(nextSalesList);
+        const recalc = recalculateTimeline(inventory, dailyHistory, receipts, nextSalesList);
+        setDailyHistory(recalc.dailyHistory);
+        resetSalesRecordForm();
+      };
+
+      // ลบเฉพาะรอบขายย่อย (หากลบจนไม่เหลือรอบเลย จะลบบันทึกของวันนั้นออก)
+      const deleteSalesRound = (dateStr, roundId) => {
+        const dFmt = formatDDMMYYYY(parseDDMMYYYY(dateStr));
+        const targetRec = dailySalesRecords.find(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === dFmt);
+        if (!targetRec) return;
+        const rounds = getRecordRounds(targetRec);
+        const targetRound = rounds.find(r => r.id === roundId);
+        if (!targetRound) return;
+        if (!window.confirm(`ยืนยันการลบยอดขาย "รอบที่ ${targetRound.roundNo}" (${formatMoney(calcRoundSalesTotal(targetRound))} บาท) ของวันที่ ${dFmt}?`)) return;
+
+        const remainingRounds = rounds.filter(r => r.id !== roundId);
+        let nextSalesList = [];
+        if (remainingRounds.length === 0) {
+          nextSalesList = dailySalesRecords.filter(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) !== dFmt);
+        } else {
+          const updatedRecord = aggregateRoundsToRecord(dFmt, remainingRounds, targetRec.id);
+          nextSalesList = dailySalesRecords
+            .map(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === dFmt ? updatedRecord : r)
+            .sort((a, b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
+        }
+        setDailySalesRecords(nextSalesList);
+        const recalc = recalculateTimeline(inventory, dailyHistory, receipts, nextSalesList);
+        setDailyHistory(recalc.dailyHistory);
+        if (srEditRoundId === roundId) resetSalesRecordForm();
       };
 
       const deleteDailySalesRecord = (id) => {
-        if (!window.confirm('ลบบันทึกยอดขายวันนี้?')) return;
-        setDailySalesRecords(prev => prev.filter(r => r.id !== id));
+        const target = dailySalesRecords.find(r => r.id === id);
+        if (!window.confirm(`ลบบันทึกยอดขายทั้งหมดของวันที่ ${target?.date || ''} หรือไม่?`)) return;
+        const nextSalesList = dailySalesRecords.filter(r => r.id !== id);
+        setDailySalesRecords(nextSalesList);
+        const recalc = recalculateTimeline(inventory, dailyHistory, receipts, nextSalesList);
+        setDailyHistory(recalc.dailyHistory);
+        if (srEditId === id) resetSalesRecordForm();
       };
 
       // บันทึกยอดฝากเงิน
@@ -2285,10 +2588,13 @@
                   </div>
                 )}
 
-                {/* ===== Card: บันทึกยอดขายรายวัน ===== */}
+                {/* ===== Card: บันทึกยอดขายรายวัน (รองรับบันทึกหลายรอบในวันเดียว บวกทบอัตโนมัติ) ===== */}
                 {(() => {
                   const normalizedSalesDate = formatDDMMYYYY(parseDDMMYYYY(salesRecordDate));
                   const existingRec = dailySalesRecords.find(r => formatDDMMYYYY(parseDDMMYYYY(r.date)) === normalizedSalesDate);
+                  const existingRounds = getRecordRounds(existingRec);
+                  const editingRoundObj = srEditRoundId ? existingRounds.find(r => r.id === srEditRoundId) : null;
+                  const nextRoundNo = existingRounds.length + 1;
                   const srGrabPct = calcCommissionPct(srGrabBefore, srGrabAfter);
                   const srLinemanPct = calcCommissionPct(srLinemanBefore, srLinemanAfter);
                   const currentTotal = (() => {
@@ -2297,44 +2603,141 @@
                     const c = srCredits.reduce((s,cr) => s+Number(cr.amount||0),0);
                     return Number(srCash||0)+Number(srTransfer||0)+g+l+c;
                   })();
+                  const existingDayTotal = existingRec ? calcDailySalesTotal(existingRec) : 0;
+                  const previewDayTotalAfterSave = editingRoundObj
+                    ? (existingDayTotal - calcRoundSalesTotal(editingRoundObj) + currentTotal)
+                    : (existingDayTotal + currentTotal);
+
+                  // เรียงลำดับประวัติตามวันที่ใหม่ขึ้นก่อนเสมอ (Descending by date)
+                  const sortedSalesRecordsDesc = [...dailySalesRecords].sort((a, b) => parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date));
+
                   return (
                     <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
                       <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-3 flex justify-between items-center">
-                        <h3 className="font-bold text-white text-sm">💰 บันทึกยอดขายรายวัน</h3>
-                        <span className="text-[10px] text-emerald-100 bg-emerald-700/80 px-2 py-0.5 rounded font-bold">☁️ บันทึกคลาวด์อัตโนมัติ</span>
+                        <div>
+                          <h3 className="font-bold text-white text-sm">💰 บันทึกยอดขายรายวัน (บวกทบหลายรอบได้)</h3>
+                          <p className="text-[10px] text-blue-100">เลือกวันที่แล้วกรอกบันทึกได้หลายรอบ ระบบจะบวกรวมยอดของวันนั้นให้อัตโนมัติ</p>
+                        </div>
+                        <span className="text-[10px] text-emerald-100 bg-emerald-700/80 px-2 py-0.5 rounded font-bold shrink-0">☁️ บันทึกคลาวด์อัตโนมัติ</span>
                       </div>
                       <div className="p-4 space-y-3">
-                        {/* วันที่ + ปุ่มวันร้านปิด */}
-                        <div className="flex gap-2 items-center">
-                          <label className="text-xs font-bold text-gray-600 shrink-0">📅 วันที่:</label>
+                        {/* วันที่ */}
+                        <div className="flex gap-2 items-center flex-wrap">
+                          <label className="text-xs font-bold text-gray-600 shrink-0">📅 วันที่บันทึก:</label>
                           <input type="date" value={toInputDate(salesRecordDate)}
-                            onChange={e => { const d = e.target.value; if(d) { const dFmt = formatDDMMYYYY(parseDDMMYYYY(d)); setSalesRecordDate(dFmt); const ex=dailySalesRecords.find(r=>formatDDMMYYYY(parseDDMMYYYY(r.date))===dFmt); if(ex) loadSalesRecordForEdit(ex); else resetSalesRecordForm(); } }}
-                            className="flex-1 p-2 text-xs border border-blue-200 rounded-lg outline-none focus:border-blue-500 font-bold" />
-                          {existingRec && !srEditId && <button onClick={()=>loadSalesRecordForEdit(existingRec)} className="text-[10px] bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold hover:bg-blue-200">✏️ แก้ไข</button>}
-                          {srEditId && <button onClick={resetSalesRecordForm} className="text-[10px] bg-gray-100 text-gray-600 px-2 py-1 rounded font-bold hover:bg-gray-200">✕ ยกเลิก</button>}
+                            onChange={e => { const d = e.target.value; if(d) { const dFmt = formatDDMMYYYY(parseDDMMYYYY(d)); setSalesRecordDate(dFmt); resetSalesRecordForm(); } }}
+                            className="flex-1 min-w-[140px] p-2 text-xs border border-blue-200 rounded-lg outline-none focus:border-blue-500 font-bold text-blue-800 bg-blue-50/30" />
+                          {existingRec && !existingRec.closedDay && (
+                            <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-1 rounded-lg font-bold">
+                              บันทึกแล้ว {existingRounds.length} รอบ (รวม {formatMoney(existingDayTotal)} บ.)
+                            </span>
+                          )}
+                          {srEditRoundId && (
+                            <button onClick={resetSalesRecordForm} className="text-[10px] bg-gray-200 text-gray-700 px-2.5 py-1 rounded-lg font-bold hover:bg-gray-300">
+                              ✕ ยกเลิกแก้ไขรอบ
+                            </button>
+                          )}
                         </div>
-                        {existingRec && !srEditId ? (
-                          /* แสดงข้อมูลที่บันทึกไว้ */
-                          <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+
+                        {/* แสดงรายการรอบที่บันทึกไว้แล้วของวันที่เลือก (เรียงรอบที่ 1 ขึ้นก่อน -> รอบที่ 2 -> ...) */}
+                        {existingRec && (
+                          <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3 space-y-2">
                             {existingRec.closedDay ? (
-                              <div className="text-center text-gray-500 font-bold text-sm">🔒 วันร้านปิด (ยอดขาย 0)</div>
-                            ) : (
-                              <div className="space-y-1 text-xs">
-                                {existingRec.cash > 0 && <div className="flex justify-between"><span className="text-gray-600">💵 เงินสด</span><span className="font-bold">{formatMoney(existingRec.cash)} บ.</span></div>}
-                                {existingRec.transfer > 0 && <div className="flex justify-between"><span className="text-gray-600">🏦 โอน</span><span className="font-bold">{formatMoney(existingRec.transfer)} บ.</span></div>}
-                                {existingRec.grab?.before > 0 && <div className="flex justify-between"><span className="text-gray-600">🛵 Grab{calcCommissionPct(existingRec.grab?.before, existingRec.grab?.after) ? `(${calcCommissionPct(existingRec.grab?.before, existingRec.grab?.after)}%)` : '(%)'}</span><span className="font-bold">{formatMoney(existingRec.grab?.after ?? existingRec.grab?.before)} บ.</span></div>}
-                                {existingRec.lineman?.before > 0 && <div className="flex justify-between"><span className="text-gray-600">🛵 LINE MAN{calcCommissionPct(existingRec.lineman?.before, existingRec.lineman?.after) ? `(${calcCommissionPct(existingRec.lineman?.before, existingRec.lineman?.after)}%)` : '(%)'}</span><span className="font-bold">{formatMoney(existingRec.lineman?.after ?? existingRec.lineman?.before)} บ.</span></div>}
-                                {(existingRec.credits||[]).map((c,i) => c.amount > 0 && <div key={i} className="flex justify-between"><span className="text-gray-600">💳 Credit: {c.name}</span><span className="font-bold text-orange-600">{formatMoney(c.amount)} บ.</span></div>)}
-                                <div className="border-t border-blue-200 pt-1 flex justify-between font-black text-blue-800"><span>ยอดรวม</span><span>{formatMoney(calcDailySalesTotal(existingRec))} บ.</span></div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-600 font-bold text-xs">🔒 วันที่ {normalizedSalesDate} บันทึกเป็น "วันร้านปิด (ยอดขาย 0)"</span>
+                                <button onClick={() => deleteDailySalesRecord(existingRec.id)} className="text-[10px] bg-red-100 text-red-700 px-2.5 py-1 rounded-lg font-bold hover:bg-red-200">
+                                  🗑️ ยกเลิกวันร้านปิด
+                                </button>
                               </div>
+                            ) : (
+                              <>
+                                <div className="flex items-center justify-between border-b border-blue-200 pb-1.5">
+                                  <span className="text-[11px] font-black text-blue-900">📊 ประวัติรอบขายของวันที่ {normalizedSalesDate} ({existingRounds.length} รอบ)</span>
+                                  <button onClick={() => deleteDailySalesRecord(existingRec.id)} className="text-[9px] text-red-500 hover:text-red-700 font-bold">🗑️ ลบทั้งวัน</button>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  {existingRounds.map((rnd) => {
+                                    const rndTotal = calcRoundSalesTotal(rnd);
+                                    const isEditingThis = srEditRoundId === rnd.id;
+                                    const rndGrabNet = (rnd.grab?.after != null && rnd.grab?.after !== '') ? Number(rnd.grab.after) : Number(rnd.grab?.before || 0);
+                                    const rndLineNet = (rnd.lineman?.after != null && rnd.lineman?.after !== '') ? Number(rnd.lineman.after) : Number(rnd.lineman?.before || 0);
+                                    return (
+                                      <div key={rnd.id} className={`p-2 rounded-lg border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 transition-colors ${isEditingThis ? 'bg-amber-50 border-amber-400 ring-1 ring-amber-300' : 'bg-white border-blue-100'}`}>
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className={`px-2 py-0.5 rounded font-black text-[10px] ${isEditingThis ? 'bg-amber-600 text-white' : 'bg-blue-700 text-white'}`}>
+                                            รอบที่ {rnd.roundNo}
+                                          </span>
+                                          {rnd.cash > 0 && <span className="text-[10px] bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded font-semibold">💵 สด {formatMoney(rnd.cash)}</span>}
+                                          {rnd.transfer > 0 && <span className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded font-semibold">🏦 โอน {formatMoney(rnd.transfer)}</span>}
+                                          {rndGrabNet > 0 && <span className="text-[10px] bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-semibold">🛵 Grab {formatMoney(rndGrabNet)}</span>}
+                                          {rndLineNet > 0 && <span className="text-[10px] bg-lime-50 text-lime-700 px-1.5 py-0.5 rounded font-semibold">🛵 LINE {formatMoney(rndLineNet)}</span>}
+                                          {(rnd.credits || []).filter(c => c.amount > 0).map((c, ci) => (
+                                            <span key={ci} className="text-[10px] bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded font-semibold">💳 {c.name}: {formatMoney(c.amount)}</span>
+                                          ))}
+                                        </div>
+                                        <div className="flex items-center justify-end gap-2 shrink-0">
+                                          <span className="font-black text-blue-800 text-xs">{formatMoney(rndTotal)} บ.</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => loadSalesRoundForEdit(normalizedSalesDate, rnd, existingRec.id)}
+                                            className="text-[10px] bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-bold"
+                                          >
+                                            ✏️ แก้ไข
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => deleteSalesRound(normalizedSalesDate, rnd.id)}
+                                            className="text-[10px] bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-2 py-0.5 rounded font-bold"
+                                          >
+                                            🗑️ ลบ
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+
+                                {/* สรุปยอดรวมสะสมทั้งวัน */}
+                                <div className="bg-white/90 rounded-lg p-2 border border-blue-200 text-xs space-y-1">
+                                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600">
+                                    {existingRec.cash > 0 && <span>💵 เงินสดรวม: <strong className="text-gray-800">{formatMoney(existingRec.cash)} บ.</strong></span>}
+                                    {existingRec.transfer > 0 && <span>🏦 โอนรวม: <strong className="text-gray-800">{formatMoney(existingRec.transfer)} บ.</strong></span>}
+                                    {(existingRec.grab?.before > 0 || existingRec.grab?.after > 0) && <span>🛵 Grab รวม: <strong className="text-green-700">{formatMoney(existingRec.grab?.after ?? existingRec.grab?.before)} บ.</strong></span>}
+                                    {(existingRec.lineman?.before > 0 || existingRec.lineman?.after > 0) && <span>🛵 LINE MAN รวม: <strong className="text-lime-700">{formatMoney(existingRec.lineman?.after ?? existingRec.lineman?.before)} บ.</strong></span>}
+                                    {(existingRec.credits || []).map((c, i) => c.amount > 0 && <span key={i}>💳 {c.name}: <strong className="text-orange-600">{formatMoney(c.amount)} บ.</strong></span>)}
+                                  </div>
+                                  <div className="border-t border-blue-100 pt-1 flex justify-between items-center font-black text-blue-900 text-sm">
+                                    <span>ยอดรวมทั้งวัน ({existingRounds.length} รอบ)</span>
+                                    <span>{formatMoney(existingDayTotal)} บาท</span>
+                                  </div>
+                                </div>
+                              </>
                             )}
                           </div>
-                        ) : (
-                          /* ฟอร์มกรอกข้อมูล */
-                          <div className="space-y-2">
+                        )}
+
+                        {/* ฟอร์มกรอกข้อมูล (เปิดให้กรอกเพิ่มรอบใหม่ได้ทันที หรือแก้ไขรอบที่เลือก) */}
+                        {!existingRec?.closedDay && (
+                          <div className="space-y-2 border border-gray-200 rounded-xl p-3 bg-white">
+                            <div className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center justify-between ${editingRoundObj ? 'bg-amber-100 text-amber-900 border border-amber-300' : existingRounds.length > 0 ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-gray-50 text-gray-700 border border-gray-200'}`}>
+                              <span>
+                                {editingRoundObj
+                                  ? `✏️ กำลังแก้ไข: รอบที่ ${editingRoundObj.roundNo} (ประจำวันที่ ${normalizedSalesDate})`
+                                  : existingRounds.length > 0
+                                    ? `➕ กรอกเพิ่มยอดขาย: รอบที่ ${nextRoundNo} (บวกทบเข้าวันที่ ${normalizedSalesDate})`
+                                    : `📝 กรอกบันทึกยอดขาย: รอบที่ 1 (ประจำวันที่ ${normalizedSalesDate})`}
+                              </span>
+                              {editingRoundObj && (
+                                <button type="button" onClick={resetSalesRecordForm} className="text-[10px] bg-white px-2 py-0.5 rounded border border-amber-300 text-amber-800 hover:bg-amber-50">
+                                  สลับไปเพิ่มรอบที่ {nextRoundNo}
+                                </button>
+                              )}
+                            </div>
+
                             <div className="grid grid-cols-2 gap-2">
-                              <div className="bg-gray-50 p-2 rounded-lg border"><label className="text-[9px] font-bold text-gray-500 block mb-1">💵 เงินสด</label><input type="number" placeholder="0" value={srCash} onChange={e=>setSrCash(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-blue-400 font-bold text-center" /></div>
-                              <div className="bg-gray-50 p-2 rounded-lg border"><label className="text-[9px] font-bold text-gray-500 block mb-1">🏦 โอน</label><input type="number" placeholder="0" value={srTransfer} onChange={e=>setSrTransfer(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-blue-400 font-bold text-center" /></div>
+                              <div className="bg-gray-50 p-2 rounded-lg border"><label className="text-[9px] font-bold text-gray-500 block mb-1">💵 เงินสด (รอบนี้)</label><input type="number" placeholder="0" value={srCash} onChange={e=>setSrCash(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-blue-400 font-bold text-center" /></div>
+                              <div className="bg-gray-50 p-2 rounded-lg border"><label className="text-[9px] font-bold text-gray-500 block mb-1">🏦 โอน (รอบนี้)</label><input type="number" placeholder="0" value={srTransfer} onChange={e=>setSrTransfer(e.target.value)} className="w-full p-1.5 text-xs border rounded outline-none focus:border-blue-400 font-bold text-center" /></div>
                             </div>
                             {/* Grab */}
                             <div className="bg-green-50 p-2 rounded-lg border border-green-100">
@@ -2374,34 +2777,90 @@
                               ))}
                             </div>
                             {/* Total + Buttons */}
-                            <div className="bg-blue-600 rounded-lg p-3 flex justify-between items-center">
-                              <div><p className="text-[9px] text-blue-200">ยอดขายรวมวันนี้</p><p className="font-black text-white text-lg">{formatMoney(currentTotal)} บ.</p></div>
-                              <div className="flex gap-2">
-                                <button onClick={()=>saveDailySalesRecord(true)} className="bg-gray-600 hover:bg-gray-700 text-white text-[10px] font-bold px-3 py-1.5 rounded">🔒 ร้านปิด</button>
-                                <button onClick={()=>saveDailySalesRecord(false)} className="bg-white text-blue-700 hover:bg-blue-50 font-bold px-4 py-1.5 rounded text-xs shadow-sm">💾 บันทึก</button>
+                            <div className={`${editingRoundObj ? 'bg-amber-600' : 'bg-blue-600'} rounded-lg p-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2`}>
+                              <div>
+                                <p className="text-[10px] text-white/80 font-bold">
+                                  {editingRoundObj ? `ยอดของรอบที่ ${editingRoundObj.roundNo} ที่กำลังแก้` : `ยอดขายของรอบที่ ${nextRoundNo} ที่กำลังกรอก`}
+                                </p>
+                                <div className="flex items-baseline gap-2 flex-wrap">
+                                  <p className="font-black text-white text-lg">{formatMoney(currentTotal)} บ.</p>
+                                  {existingRounds.length > 0 && currentTotal > 0 && (
+                                    <span className="text-[10px] bg-white/20 text-white px-2 py-0.5 rounded font-bold">
+                                      รวมทั้งวันจะเป็น: {formatMoney(previewDayTotalAfterSave)} บ.
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex gap-2 w-full sm:w-auto justify-end">
+                                {!editingRoundObj && existingRounds.length === 0 && (
+                                  <button onClick={()=>saveDailySalesRecord(true)} className="bg-gray-700 hover:bg-gray-800 text-white text-[10px] font-bold px-3 py-1.5 rounded">🔒 ร้านปิด</button>
+                                )}
+                                <button onClick={()=>saveDailySalesRecord(false)} className="bg-white text-blue-800 hover:bg-blue-50 font-black px-4 py-2 rounded-lg text-xs shadow-sm">
+                                  {editingRoundObj ? `💾 บันทึกแก้ไข รอบที่ ${editingRoundObj.roundNo}` : existingRounds.length > 0 ? `➕ บันทึกเพิ่ม รอบที่ ${nextRoundNo}` : `💾 บันทึกยอดขาย (รอบที่ 1)`}
+                                </button>
                               </div>
                             </div>
                           </div>
                         )}
-                        {/* ประวัติ 7 วันล่าสุด */}
-                        {dailySalesRecords.length > 0 && (
+
+                        {/* ประวัติ 7 วันล่าสุด (เรียงวันที่ใหม่ขึ้นก่อน แต่ภายในวันเรียงรอบที่ 1 -> 2 -> 3) */}
+                        {sortedSalesRecordsDesc.length > 0 && (
                           <div>
-                            <p className="text-[10px] font-bold text-gray-500 mb-1">📋 ประวัติ 7 วันล่าสุด</p>
-                            <div className="space-y-1 max-h-40 overflow-y-auto">
-                              {dailySalesRecords.slice(0,7).map(r => (
-                                <div key={r.id} className="flex items-center gap-2 text-xs bg-gray-50 rounded px-2 py-1 border border-gray-100">
-                                  <span className="font-bold text-gray-700 shrink-0 w-20">{r.date}</span>
-                                  {r.closedDay ? <span className="text-gray-400 flex-1">ร้านปิด</span> : (
-                                    <span className="text-blue-700 font-bold flex-1">{formatMoney(calcDailySalesTotal(r))} บ.
-                                      {r.grab?.before > 0 && <span className="ml-1 text-green-600 text-[9px]">Grab{calcCommissionPct(r.grab?.before, r.grab?.after) ? `(${calcCommissionPct(r.grab?.before, r.grab?.after)}%)` : '(%)'}</span>}
-                                      {r.lineman?.before > 0 && <span className="ml-1 text-lime-600 text-[9px]">LINE{calcCommissionPct(r.lineman?.before, r.lineman?.after) ? `(${calcCommissionPct(r.lineman?.before, r.lineman?.after)}%)` : '(%)'}</span>}
-                                      {(r.credits||[]).filter(c=>c.amount>0).map((c,i)=><span key={i} className="ml-1 text-orange-500 text-[9px]">💳{c.name}</span>)}
-                                    </span>
-                                  )}
-                                  <button onClick={()=>{ setSalesRecordDate(r.date); loadSalesRecordForEdit(r); }} className="text-blue-500 text-[9px] shrink-0 hover:text-blue-700">✏️</button>
-                                  <button onClick={()=>deleteDailySalesRecord(r.id)} className="text-red-400 text-[9px] shrink-0 hover:text-red-600">🗑</button>
-                                </div>
-                              ))}
+                            <p className="text-[10px] font-bold text-gray-500 mb-1.5">📋 ประวัติยอดขาย 7 วันล่าสุด (เรียงวันที่ใหม่ขึ้นก่อน • รอบขายเรียงรอบที่ 1 ขึ้นก่อน)</p>
+                            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                              {sortedSalesRecordsDesc.slice(0, 7).map(r => {
+                                const rRounds = getRecordRounds(r);
+                                const isSelectedDate = formatDDMMYYYY(parseDDMMYYYY(r.date)) === normalizedSalesDate;
+                                return (
+                                  <div key={r.id} className={`rounded-lg px-2.5 py-2 border text-xs transition-colors ${isSelectedDate ? 'bg-blue-50/60 border-blue-300' : 'bg-gray-50 border-gray-200'}`}>
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span className="font-black text-gray-800 shrink-0">{r.date}</span>
+                                        {r.closedDay ? (
+                                          <span className="text-gray-400 font-bold">🔒 ร้านปิด</span>
+                                        ) : (
+                                          <span className="text-blue-700 font-black truncate">
+                                            รวม {formatMoney(calcDailySalesTotal(r))} บ.
+                                            <span className="ml-1.5 text-[10px] font-bold text-gray-500">({rRounds.length} รอบ)</span>
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-1.5 shrink-0">
+                                        {!r.closedDay && (
+                                          <button
+                                            type="button"
+                                            onClick={() => { setSalesRecordDate(formatDDMMYYYY(parseDDMMYYYY(r.date))); resetSalesRecordForm(); }}
+                                            className="text-[10px] bg-emerald-100 hover:bg-emerald-200 text-emerald-800 px-2 py-0.5 rounded font-bold"
+                                            title="เลือกวันนี้เพื่อเพิ่มรอบขายหรือดูรายละเอียด"
+                                          >
+                                            ➕ เพิ่มรอบ
+                                          </button>
+                                        )}
+                                        <button onClick={() => deleteDailySalesRecord(r.id)} className="text-red-400 text-[10px] hover:text-red-600 px-1" title="ลบทั้งวัน">🗑</button>
+                                      </div>
+                                    </div>
+                                    {/* แสดงรอบย่อยเรียงจาก รอบที่ 1 -> รอบที่ 2 -> ... */}
+                                    {!r.closedDay && rRounds.length > 0 && (
+                                      <div className="mt-1.5 pl-2 border-l-2 border-blue-200 space-y-1">
+                                        {rRounds.map(rnd => (
+                                          <div key={rnd.id} className="flex items-center justify-between text-[10px] text-gray-600 bg-white/80 px-2 py-0.5 rounded border border-gray-100">
+                                            <div className="flex items-center gap-1.5 truncate">
+                                              <span className="font-bold text-blue-800">รอบที่ {rnd.roundNo}:</span>
+                                              <span className="font-bold text-gray-800">{formatMoney(calcRoundSalesTotal(rnd))} บ.</span>
+                                              {rnd.cash > 0 && <span className="text-gray-500">(สด {formatMoney(rnd.cash)})</span>}
+                                              {rnd.transfer > 0 && <span className="text-indigo-600">(โอน {formatMoney(rnd.transfer)})</span>}
+                                            </div>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                              <button onClick={() => loadSalesRoundForEdit(r.date, rnd, r.id)} className="text-blue-600 hover:text-blue-800 font-bold px-1">✏️ แก้</button>
+                                              <button onClick={() => deleteSalesRound(r.date, rnd.id)} className="text-red-500 hover:text-red-700 font-bold px-1">✕</button>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           </div>
                         )}
@@ -3391,15 +3850,22 @@
                 <div className="bg-white border border-gray-200 p-2 rounded-xl shadow-sm sticky top-[104px] z-20 space-y-1.5">
                   <div className="flex items-center gap-1.5">
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1 flex-wrap">
                         <h2 className="font-bold text-gray-800 text-[13px] whitespace-nowrap">📝 นับสต๊อก</h2>
                         <button
                           type="button"
-                          onClick={() => alert('วิธีนับสต๊อก\n\n• ช่องตัวเลข = สต๊อก "ของดี" ที่เหลือใช้ปรุงอาหารได้จริง (ไม่รวมของเสีย)\n• มีของเสีย กดปุ่ม 🗑️ เพื่อแจ้ง ระบบจะแยกคิด ต้นทุนขาย = ใช้ไป + ของเสีย\n• "✓ เท่าเดิม" = นับได้เท่ายอดในระบบ (ไม่ต้องพิมพ์)\n• รายการที่ไม่ได้เช็ค ระบบจะยกยอดในระบบไปให้อัตโนมัติ')}
+                          onClick={() => alert('วิธีนับสต๊อก (เช็คอิสระ & ปิดรอบสิ้นวัน)\n\n• เช็คสต๊อกเมื่อไหร่ก็ได้อิสระตลอดทั้งวัน (กดส่งยอดแบบ "อัปเดตระหว่างวัน" ได้ไม่จำกัดครั้ง)\n• เมื่อนับครั้งสุดท้ายของวัน ให้ติ๊ก "🏁 เช็คสต๊อกรอบสุดท้าย (ปิดรอบสิ้นวัน)" เพื่อเปลี่ยนขึ้นวันใหม่\n• หากเลยเวลา 04:00 น. ระบบจะเตือนให้ยืนยันส่งยอดเป็นของวันก่อนหน้าและบังคับติ๊กเปลี่ยนวันเพื่อขึ้นวันใหม่')}
                           className="w-4 h-4 rounded-full bg-gray-100 text-gray-500 text-[9px] font-bold leading-none shrink-0"
                           title="วิธีนับสต๊อก"
                         >i</button>
-                        <input type="date" value={toInputDate(countDate)} onChange={(e) => setCountDate(e.target.value)} className="text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1 py-0.5 outline-none min-w-0 w-[118px]" />
+                        <input type="date" value={toInputDate(countDate)} onChange={(e) => { setCountDate(e.target.value); setLastClosedDayNotice(null); }} className="text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1 py-0.5 outline-none min-w-0 w-[115px]" />
+                        {currentCountPeriodInfo.existingSameDay?.isDayClosed ? (
+                          <span className="text-[9px] bg-gray-800 text-white font-bold px-1.5 py-0.5 rounded whitespace-nowrap">🔒 ปิดรอบแล้ว</span>
+                        ) : currentCountPeriodInfo.existingSameDay ? (
+                          <span className="text-[9px] bg-blue-100 text-blue-800 font-bold px-1.5 py-0.5 rounded whitespace-nowrap">🔄 ระหว่างวัน</span>
+                        ) : (!currentCountPeriodInfo.isRetroactive && isPast4AMCutoffForDate(currentCountPeriodInfo.endDateStr)) ? (
+                          <span className="text-[9px] bg-amber-500 text-white font-bold px-1.5 py-0.5 rounded whitespace-nowrap">⏰ เลย 04:00 น.</span>
+                        ) : null}
                       </div>
                       {currentCountPeriodInfo.daysDiff > 1 && (
                         <div className="text-[9px] text-orange-700 font-bold truncate mt-0.5">รวบยอด {currentCountPeriodInfo.daysDiff} วัน ({currentCountPeriodInfo.startDateStr} – {currentCountPeriodInfo.endDateStr})</div>
@@ -3409,7 +3875,9 @@
                       onClick={submitDailyCount}
                       className={`shrink-0 active:scale-95 text-white font-bold rounded-lg shadow-sm px-2.5 py-1.5 text-[11px] leading-tight text-center transition-all ${currentCountPeriodInfo.existingSameDay ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'}`}
                     >
-                      {currentCountPeriodInfo.existingSameDay ? '✅ อัปเดตยอด' : '✅ ส่งยอด'}
+                      {currentCountPeriodInfo.existingSameDay
+                        ? (currentCountPeriodInfo.existingSameDay.isDayClosed ? '✅ อัปเดตยอด' : '✅ อัปเดต/ปิดรอบ')
+                        : '✅ ส่งยอด'}
                       <span className="block text-[9px] font-semibold opacity-90">{checkedCount}/{allVisibleItems.length} รายการ</span>
                     </button>
                   </div>
@@ -3438,10 +3906,55 @@
                     <input type="text" value={staffNameInput} onChange={(e) => setStaffNameInput(e.target.value)} maxLength="30" placeholder="✍️ ลงชื่อผู้ตรวจสอบ (จำเป็น)" className={`w-full px-2 py-1.5 text-[11px] border rounded-lg outline-none focus:border-blue-500 ${staffNameInput ? 'border-gray-300' : 'border-red-300 bg-red-50/40'}`} />
                   )}
 
+                  {/* แถบแจ้งเตือนเมื่อเพิ่งกดปิดรอบสิ้นวันและเปลี่ยนขึ้นวันใหม่ */}
+                  {lastClosedDayNotice && (
+                    <div className="flex items-center gap-1.5 bg-emerald-600 text-white rounded-lg px-2 py-1 text-[10px]">
+                      <span className="flex-1 min-w-0 font-bold truncate">🏁 ปิดรอบ {lastClosedDayNotice.closedDate} สำเร็จ → เปลี่ยนเป็นวันใหม่ {lastClosedDayNotice.newDate} แล้ว</span>
+                      <button type="button" onClick={() => { setCountDate(toInputDate(lastClosedDayNotice.closedDate)); setLastClosedDayNotice(null); }} className="shrink-0 text-[9px] bg-white text-emerald-800 font-bold px-1.5 py-0.5 rounded">ดู {lastClosedDayNotice.closedDate}</button>
+                      <button type="button" onClick={() => setLastClosedDayNotice(null)} className="shrink-0 font-bold px-1">✕</button>
+                    </div>
+                  )}
+
+                  {/* แถบเตือนหลัง 04:00 น. กรณีรอบวันก่อนหน้ายังไม่ได้ปิดสิ้นวัน */}
+                  {!currentCountPeriodInfo.isRetroactive && (unclosedPrevDayAfter4AMInfo.isAlertActive || (!currentCountPeriodInfo.existingSameDay?.isDayClosed && isPast4AMCutoffForDate(currentCountPeriodInfo.endDateStr))) && (
+                    <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-400 rounded-lg px-2 py-1">
+                      <span className="flex-1 min-w-0 text-[10px] text-amber-900 font-bold truncate">
+                        ⏰ เลย 04:00 น.: รอบ {isPast4AMCutoffForDate(currentCountPeriodInfo.endDateStr) ? currentCountPeriodInfo.endDateStr : unclosedPrevDayAfter4AMInfo.unclosedDate} ยังไม่ปิดสิ้นวัน (กด "✅ ส่งยอด" เพื่อยืนยันปิดรอบและขึ้นวันใหม่)
+                      </span>
+                      {currentCountPeriodInfo.endDateStr !== unclosedPrevDayAfter4AMInfo.unclosedDate && unclosedPrevDayAfter4AMInfo.isAlertActive ? (
+                        <button type="button" onClick={() => setCountDate(toInputDate(unclosedPrevDayAfter4AMInfo.unclosedDate))} className="shrink-0 text-[9px] bg-amber-600 text-white font-bold px-1.5 py-0.5 rounded">
+                          สลับไป {unclosedPrevDayAfter4AMInfo.unclosedDate}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextD = unclosedPrevDayAfter4AMInfo.calTodayStr;
+                            if (window.confirm(`ต้องการเปลี่ยนวันเป็นวันที่ ${nextD} ทันที (โดยยังไม่ส่งยอดปิดรอบของวันที่ ${currentCountPeriodInfo.endDateStr}) ใช่หรือไม่?`)) {
+                              lastLoadedActiveDateRef.current = nextD;
+                              setActiveStockDate(nextD);
+                              setCountDate(toInputDate(nextD));
+                            }
+                          }}
+                          className="shrink-0 text-[9px] bg-white text-amber-900 border border-amber-400 font-bold px-1.5 py-0.5 rounded"
+                        >
+                          ขึ้นวันใหม่ {unclosedPrevDayAfter4AMInfo.calTodayStr}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                   {currentCountPeriodInfo.existingSameDay && (
                     <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-300 rounded-lg px-2 py-1">
-                      <span className="flex-1 min-w-0 text-[10px] text-emerald-900 font-semibold truncate">✅ บันทึกสต๊อกวันที่ {currentCountPeriodInfo.endDateStr} แล้ว (แสดงยอดคงเหลือหลังเช็ค — แก้ตัวเลขแล้วกดอัปเดตได้ทันที)</span>
-                      <button type="button" onClick={() => setDailyCounts(buildCountsFromHistoryRecord(currentCountPeriodInfo.existingSameDay))} className="shrink-0 text-[9px] bg-emerald-600 text-white font-bold px-1.5 py-0.5 rounded">↺ คืนค่าที่บันทึก</button>
+                      <span className="flex-1 min-w-0 text-[10px] text-emerald-900 font-semibold truncate">
+                        {currentCountPeriodInfo.existingSameDay.isDayClosed
+                          ? `🔒 ปิดรอบสิ้นวัน ${currentCountPeriodInfo.endDateStr} แล้ว (แสดงยอดคงเหลือหลังเช็ค — แก้ไขได้)`
+                          : `🔄 เช็คระหว่างวัน (${currentCountPeriodInfo.endDateStr}) แล้ว — เช็คเพิ่มได้อิสระ หรือกดปุ่มขวาบนเพื่อปิดรอบสิ้นวัน`}
+                      </span>
+                      {currentCountPeriodInfo.existingSameDay.isDayClosed && (
+                        <button type="button" onClick={() => { const nextD = addDaysDDMMYYYY(currentCountPeriodInfo.endDateStr, 1); setCountDate(toInputDate(nextD)); }} className="shrink-0 text-[9px] bg-blue-600 text-white font-bold px-1.5 py-0.5 rounded">➡️ ไป {addDaysDDMMYYYY(currentCountPeriodInfo.endDateStr, 1)}</button>
+                      )}
+                      <button type="button" onClick={() => setDailyCounts(buildCountsFromHistoryRecord(currentCountPeriodInfo.existingSameDay))} className="shrink-0 text-[9px] bg-emerald-600 text-white font-bold px-1.5 py-0.5 rounded">↺ คืนค่า</button>
                     </div>
                   )}
                   {!currentCountPeriodInfo.existingSameDay && currentCountPeriodInfo.isRetroactive && (
@@ -4044,6 +4557,219 @@
           )}
 
           {/* ================= MODALS ================= */}
+          {stockSubmitModal && (() => {
+            const modalPeriodInfo = computePeriodInfoForDate(stockSubmitModal.selectedTargetDate);
+            const isAfter4AMMode = stockSubmitModal.mode === 'after4am';
+            const isRetroMode = stockSubmitModal.mode === 'retroactive';
+            const isSelectingPrevDay = stockSubmitModal.selectedTargetDate === stockSubmitModal.prevDateStr;
+
+            return (
+              <div className="fixed inset-0 z-[65] flex items-center justify-center p-4 bg-gray-900/75 backdrop-blur-sm animate-in fade-in">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-200">
+                  <div className={`${isAfter4AMMode ? 'bg-amber-600' : isRetroMode ? 'bg-indigo-600' : 'bg-blue-600'} px-4 py-3 flex justify-between items-center`}>
+                    <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
+                      <span>{isAfter4AMMode ? '⏰' : isRetroMode ? '⏳' : '📋'}</span>
+                      <span>
+                        {isAfter4AMMode
+                          ? 'เตือนหลัง 04:00 น. — ยืนยันส่งยอดเช็คสต๊อกปิดสิ้นวัน'
+                          : isRetroMode
+                            ? `ยืนยันลงสต๊อกย้อนหลัง (${modalPeriodInfo.endDateStr})`
+                            : `ยืนยันการส่งยอดสต๊อก (${modalPeriodInfo.endDateStr})`}
+                      </span>
+                    </h3>
+                    <button onClick={() => setStockSubmitModal(null)} className="text-white font-bold text-lg leading-none">&times;</button>
+                  </div>
+
+                  <div className="p-4 space-y-3.5 text-xs">
+                    {isAfter4AMMode ? (
+                      <>
+                        <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-amber-900 leading-relaxed">
+                          <p className="font-black text-amber-900 text-xs mb-1">⚠️ ขณะนี้เลยเวลา 04:00 น. แล้ว</p>
+                          <p className="text-[11px]">
+                            หากคุณกำลังเช็คสต๊อกของรอบคืนวันที่ <strong>{stockSubmitModal.prevDateStr}</strong> กรุณาเลือกยืนยันยอดส่งสต๊อกเป็นของวันที่ <strong>{stockSubmitModal.prevDateStr}</strong> และ<strong>ติ๊กเลือกเปลี่ยนวัน</strong>เพื่อขึ้นวันใหม่เป็นวันที่ <strong>{stockSubmitModal.newDateStr}</strong>
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block font-bold text-gray-700 text-xs">1. ยืนยันว่ายอดสต๊อกที่กำลังส่งนี้เป็นของวันใด:</label>
+                          <label className={`flex items-start gap-2.5 p-2.5 rounded-xl border-2 cursor-pointer transition-all ${isSelectingPrevDay ? 'border-amber-500 bg-amber-50/60' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
+                            <input
+                              type="radio"
+                              name="after4amTargetDate"
+                              checked={isSelectingPrevDay}
+                              onChange={() => setStockSubmitModal({ ...stockSubmitModal, selectedTargetDate: stockSubmitModal.prevDateStr, rolloverConfirmed: false })}
+                              className="mt-0.5 accent-amber-600"
+                            />
+                            <div>
+                              <div className="font-black text-gray-900 text-xs">เป็นยอดสต๊อกของวันที่ {stockSubmitModal.prevDateStr} (รอบคืนวันที่ {stockSubmitModal.prevDateStr.split('-')[0]})</div>
+                              <div className="text-[10px] text-gray-600 mt-0.5">บันทึกเป็นสต๊อกสิ้นวันของวันที่ {stockSubmitModal.prevDateStr}</div>
+                            </div>
+                          </label>
+
+                          {stockSubmitModal.newDateStr !== stockSubmitModal.prevDateStr && (
+                            <label className={`flex items-start gap-2.5 p-2.5 rounded-xl border-2 cursor-pointer transition-all ${!isSelectingPrevDay ? 'border-blue-500 bg-blue-50/60' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
+                              <input
+                                type="radio"
+                                name="after4amTargetDate"
+                                checked={!isSelectingPrevDay}
+                                onChange={() => setStockSubmitModal({ ...stockSubmitModal, selectedTargetDate: stockSubmitModal.newDateStr, rolloverConfirmed: false })}
+                                className="mt-0.5 accent-blue-600"
+                              />
+                              <div>
+                                <div className="font-black text-gray-900 text-xs">เป็นยอดสต๊อกของวันใหม่ ({stockSubmitModal.newDateStr})</div>
+                                <div className="text-[10px] text-gray-600 mt-0.5">เปลี่ยนวันและบันทึกเป็นสต๊อกของวันที่ {stockSubmitModal.newDateStr} ทันที</div>
+                              </div>
+                            </label>
+                          )}
+                        </div>
+
+                        <div className="pt-1">
+                          <label className="block font-bold text-red-700 text-xs mb-1.5">2. บังคับติ๊กยืนยันเปลี่ยนวันเพื่อขึ้นวันใหม่ *</label>
+                          <label className={`flex items-start gap-2.5 p-3 rounded-xl border-2 cursor-pointer transition-all ${stockSubmitModal.rolloverConfirmed ? 'border-emerald-500 bg-emerald-50' : 'border-red-300 bg-red-50/50'}`}>
+                            <input
+                              type="checkbox"
+                              checked={stockSubmitModal.rolloverConfirmed}
+                              onChange={(e) => setStockSubmitModal({ ...stockSubmitModal, rolloverConfirmed: e.target.checked })}
+                              className="mt-0.5 w-4 h-4 accent-emerald-600 rounded shrink-0"
+                            />
+                            <span className="text-xs font-bold text-gray-900 leading-snug">
+                              {isSelectingPrevDay ? (
+                                <>ยืนยันส่งยอดสต๊อกเป็นของวันที่ <strong className="text-amber-800">{stockSubmitModal.prevDateStr}</strong> และ<strong className="text-emerald-800 underline">เปลี่ยนวันเพื่อขึ้นวันใหม่เป็นวันที่ {stockSubmitModal.newDateStr}</strong></>
+                              ) : (
+                                <>ยืนยันเปลี่ยนวันขึ้นวันใหม่เป็นวันที่ <strong className="text-blue-800">{stockSubmitModal.newDateStr}</strong> และบันทึกสต๊อกเข้าวันที่ {stockSubmitModal.newDateStr}</>
+                              )}
+                            </span>
+                          </label>
+                        </div>
+
+                        {isSelectingPrevDay && (
+                          <div className="text-center pt-1">
+                            <button
+                              type="button"
+                              onClick={() => executeSubmitDailyCount(stockSubmitModal.prevDateStr, false, null)}
+                              className="text-[10px] text-gray-500 hover:text-gray-800 underline font-semibold"
+                            >
+                              หากยังนับรอบวันที่ {stockSubmitModal.prevDateStr} ไม่เสร็จ กดตรงนี้เพื่อบันทึกพักไว้ชั่วคราว (ยังไม่เปลี่ยนวัน)
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    ) : isRetroMode ? (
+                      <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-indigo-900 space-y-1.5">
+                        <p className="font-bold text-xs">⏳ โหมดลงสต๊อกย้อนหลังประจำวันที่ {modalPeriodInfo.endDateStr}</p>
+                        <p className="text-[11px]">• รอบนี้จะครอบคลุม: <strong>{modalPeriodInfo.startDateStr} ถึง {modalPeriodInfo.endDateStr} ({modalPeriodInfo.daysDiff} วัน)</strong></p>
+                        <p className="text-[11px]">• ระบบจะแยกคิดต้นทุนจริงของวันที่ {modalPeriodInfo.endDateStr} และปรับปรุงยอดยกมา + คำนวณต้นทุนของรอบถัดไป ({modalPeriodInfo.nextCheck?.endDate}) ใหม่ให้อัตโนมัติทั้งหมด</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="bg-gray-50 border border-gray-200 rounded-xl p-2.5 flex justify-between items-center">
+                          <div>
+                            <div className="text-[10px] text-gray-500 font-bold">รอบวันของสต๊อกที่จะบันทึก</div>
+                            <div className="font-black text-gray-800 text-sm">
+                              {modalPeriodInfo.daysDiff > 1
+                                ? `${modalPeriodInfo.startDateStr} ถึง ${modalPeriodInfo.endDateStr} (รวม ${modalPeriodInfo.daysDiff} วัน)`
+                                : `ประจำวันที่ ${modalPeriodInfo.endDateStr}`}
+                            </div>
+                          </div>
+                          {modalPeriodInfo.existingSameDay && (
+                            <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-bold">อัปเดตทับข้อมูลเดิม</span>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block font-bold text-gray-700 text-xs">เลือกรูปแบบการส่งยอดสต๊อก:</label>
+
+                          <label className={`flex items-start gap-2.5 p-3 rounded-xl border-2 cursor-pointer transition-all ${!stockSubmitModal.rolloverConfirmed ? 'border-blue-500 bg-blue-50/60' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
+                            <input
+                              type="radio"
+                              name="normalCountMode"
+                              checked={!stockSubmitModal.rolloverConfirmed}
+                              onChange={() => setStockSubmitModal({ ...stockSubmitModal, rolloverConfirmed: false })}
+                              className="mt-0.5 accent-blue-600"
+                            />
+                            <div>
+                              <div className="font-black text-blue-900 text-xs">🔄 เช็ค/อัปเดตสต๊อกระหว่างวัน (ยังไม่เปลี่ยนวัน)</div>
+                              <div className="text-[10px] text-gray-600 mt-0.5">
+                                บันทึกยอดคงเหลือล่าสุดของวันที่ <strong>{modalPeriodInfo.endDateStr}</strong> โดยหน้าเช็คสต๊อกจะยังอยู่ที่วันที่ {modalPeriodInfo.endDateStr} สามารถกลับมาเช็คเพิ่มเมื่อไหร่ก็ได้อิสระ
+                              </div>
+                            </div>
+                          </label>
+
+                          <label className={`flex items-start gap-2.5 p-3 rounded-xl border-2 cursor-pointer transition-all ${stockSubmitModal.rolloverConfirmed ? 'border-emerald-500 bg-emerald-50/70' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
+                            <input
+                              type="radio"
+                              name="normalCountMode"
+                              checked={stockSubmitModal.rolloverConfirmed}
+                              onChange={() => setStockSubmitModal({ ...stockSubmitModal, rolloverConfirmed: true })}
+                              className="mt-0.5 accent-emerald-600"
+                            />
+                            <div>
+                              <div className="font-black text-emerald-900 text-xs">🏁 เช็คสต๊อกสุดท้ายของวัน (ปิดรอบสิ้นวัน & เปลี่ยนวัน)</div>
+                              <div className="text-[10px] text-gray-600 mt-0.5">
+                                ปิดรอบสต๊อกของวันที่ <strong>{modalPeriodInfo.endDateStr}</strong> และ<strong>เปลี่ยนขึ้นวันใหม่เป็นวันที่ {stockSubmitModal.newDateStr}</strong> ทันที
+                              </div>
+                            </div>
+                          </label>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="p-3 border-t bg-gray-50 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setStockSubmitModal(null)}
+                      className="px-4 py-2.5 bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold rounded-xl text-xs transition-colors"
+                    >
+                      ยกเลิก
+                    </button>
+                    {isAfter4AMMode ? (
+                      <button
+                        type="button"
+                        disabled={!stockSubmitModal.rolloverConfirmed}
+                        onClick={() => {
+                          if (!stockSubmitModal.rolloverConfirmed) return;
+                          if (isSelectingPrevDay) {
+                            executeSubmitDailyCount(stockSubmitModal.prevDateStr, true, stockSubmitModal.newDateStr);
+                          } else {
+                            executeSubmitDailyCount(stockSubmitModal.newDateStr, false, stockSubmitModal.newDateStr);
+                          }
+                        }}
+                        className={`flex-1 py-2.5 font-black rounded-xl text-xs text-white shadow-sm transition-all ${stockSubmitModal.rolloverConfirmed ? 'bg-emerald-600 hover:bg-emerald-700 active:scale-95' : 'bg-gray-300 cursor-not-allowed'}`}
+                      >
+                        {isSelectingPrevDay
+                          ? `✅ ยืนยันส่งยอดวันที่ ${stockSubmitModal.prevDateStr} & ขึ้นวันใหม่ (${stockSubmitModal.newDateStr})`
+                          : `✅ ยืนยันส่งยอดเข้าวันใหม่ (${stockSubmitModal.newDateStr})`}
+                      </button>
+                    ) : isRetroMode ? (
+                      <button
+                        type="button"
+                        onClick={() => executeSubmitDailyCount(modalPeriodInfo.endDateStr, true, null)}
+                        className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl text-xs shadow-sm active:scale-95 transition-all"
+                      >
+                        ✅ ยืนยันบันทึกสต๊อกย้อนหลัง ({modalPeriodInfo.endDateStr})
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => executeSubmitDailyCount(
+                          modalPeriodInfo.endDateStr,
+                          stockSubmitModal.rolloverConfirmed,
+                          stockSubmitModal.rolloverConfirmed ? stockSubmitModal.newDateStr : null
+                        )}
+                        className={`flex-1 py-2.5 font-black rounded-xl text-xs text-white shadow-sm active:scale-95 transition-all ${stockSubmitModal.rolloverConfirmed ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                      >
+                        {stockSubmitModal.rolloverConfirmed
+                          ? `🏁 ปิดรอบวันที่ ${modalPeriodInfo.endDateStr} & ขึ้นวันใหม่ (${stockSubmitModal.newDateStr})`
+                          : `💾 บันทึกอัปเดตระหว่างวัน (${modalPeriodInfo.endDateStr})`}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {showWasteModal && (() => {
             const modalItem = inventory.find(i => i.id === showWasteModal);
             const openQty = currentCountPeriodInfo.openByItem[showWasteModal] || 0;
